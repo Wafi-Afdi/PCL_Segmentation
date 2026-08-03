@@ -6,10 +6,10 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     input_cloud = DeclareLaunchArgument(
-        'input_cloud_topic', default_value='/input_cloud',
+        'input_cloud_topic', default_value='/zed2i/depth/points',
         description='Input point cloud topic')
     odom = DeclareLaunchArgument(
-        'odom_topic', default_value='/odom',
+        'odom_topic', default_value='/mavros/odometry/out',
         description='Odometry topic')
     output_cloud = DeclareLaunchArgument(
         'output_cloud_topic', default_value='/output_cloud',

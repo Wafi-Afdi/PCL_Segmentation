@@ -1,4 +1,5 @@
 import threading
+import sys
 
 import numpy as np
 import open3d as o3d
@@ -10,9 +11,7 @@ from sensor_msgs.msg import PointCloud2
 from nav_msgs.msg import Odometry
 from sensor_msgs_py import point_cloud2
 
-from pcl_cstm_msg.msg import PointCloudArray
-from pcl_cstm_msg.msg import VCylindersFit
-from pcl_cstm_msg.msg import TrackedCylinderArray
+from pcl_cstm_msg.msg import PointCloudArray, TrackedCylinderArray, VCylindersFit, TrackedCylinderArray, VNormals
 
 
 CLUSTER_COLORS = [
@@ -31,12 +30,13 @@ CLUSTER_COLORS = [
 ]
 
 
-def _make_cylinder_wireframe(center_x, center_y, base_z, radius, height, color):
+def _make_cylinder_wireframe(center_x, center_y, center_z, radius, height, color, orientation_q):
     mesh = o3d.geometry.TriangleMesh.create_cylinder(
         radius=radius, height=height, resolution=20)
-    r = o3d.geometry.get_rotation_matrix_from_axis_angle([0, 0, 0])
+    r = o3d.geometry.get_rotation_matrix_from_quaternion(
+        [orientation_q.w, orientation_q.x, orientation_q.y, orientation_q.z])
     mesh.rotate(r, center=[0.0, 0.0, 0.0])
-    mesh.translate([center_x, center_y, base_z + height / 2.0])
+    mesh.translate([center_x, center_y, center_z])
 
     lines = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
     lines.paint_uniform_color(color)
@@ -72,16 +72,26 @@ class VoxelVisualizer(Node):
         self.voxel_size = self.get_parameter('voxel_size').value
 
         self._lock = threading.Lock()
+        
+        # --- PAUSE STATE ---
+        self.is_paused = False
+
         self._latest_cloud = None
         self._latest_clusters = None
         self._latest_cylinders = None
         self._latest_tracked_cylinders = None
+        self._latest_normals = None
+        self._latest_origins = None
         self._latest_odom = None
         self._first_frame = True
 
-        self._vis = o3d.visualization.Visualizer()
-        self._vis.create_window(window_name='Point Cloud Voxels',
+        self._vis = o3d.visualization.VisualizerWithKeyCallback()
+        self._vis.create_window(window_name='Point Cloud Voxels (Press ENTER to Pause)',
                                 width=1024, height=768)
+
+        # Register ENTER key in Open3D window (GLFW codes: 257 = Enter, 335 = Numpad Enter)
+        self._vis.register_key_callback(257, self._toggle_pause)
+        self._vis.register_key_callback(335, self._toggle_pause)
 
         axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
         self._vis.add_geometry(axes)
@@ -119,7 +129,38 @@ class VoxelVisualizer(Node):
             self._tracked_cylinders_callback,
             qos_profile_sensor_data)
 
+        self._sub_normals = self.create_subscription(
+            VNormals,
+            '/normals',
+            self._normals_callback,
+            qos_profile_sensor_data)
+
+        # --- TERMINAL INPUT LISTENER THREAD ---
+        self._input_thread = threading.Thread(target=self._wait_for_terminal_enter, daemon=True)
+        self._input_thread.start()
+        
+        self.get_logger().info('Visualizer started. Press ENTER in the terminal or Open3D window to pause/resume.')
+
+    def _toggle_pause(self, vis=None):
+        """ Toggles the pause state and logs it. """
+        self.is_paused = not self.is_paused
+        state = "PAUSED (Ignoring incoming data)" if self.is_paused else "RESUMED (Listening to topics)"
+        self.get_logger().info(f"\n\n---> [ENTER PRESSED] SUBSCRIPTIONS {state} <---\n")
+        return False
+
+    def _wait_for_terminal_enter(self):
+        """ Background thread that waits for terminal 'Enter' presses. """
+        while rclpy.ok():
+            try:
+                sys.stdin.readline()
+                self._toggle_pause()
+            except Exception:
+                break
+
     def _cloud_callback(self, msg: PointCloud2):
+        if self.is_paused:
+            return
+            
         self.get_logger().info('First point cloud received!', once=True)
 
         points = np.array([
@@ -140,7 +181,27 @@ class VoxelVisualizer(Node):
         with self._lock:
             self._latest_cloud = voxel_grid
 
+    def _normals_callback(self, msg: VNormals):
+        if self.is_paused:
+            return
+            
+        if not msg.normals:
+            return
+        normals = []
+        origins = []
+        for i, normal in enumerate(msg.normals):
+            normals.append(normal)
+        for i, origin in enumerate(msg.origins):
+            origins.append(origin)
+        if normals and origins:
+            with self._lock:
+                self._latest_normals = normals
+                self._latest_origins = origins
+
     def _clusters_callback(self, msg: PointCloudArray):
+        if self.is_paused:
+            return
+            
         if not msg.clouds:
             return
 
@@ -162,7 +223,6 @@ class VoxelVisualizer(Node):
             o3d_cloud.points = o3d.utility.Vector3dVector(points)
 
             color = CLUSTER_COLORS[i % len(CLUSTER_COLORS)]
-
             o3d_cloud.paint_uniform_color(color)
 
             voxel = o3d.geometry.VoxelGrid.create_from_point_cloud(
@@ -175,29 +235,65 @@ class VoxelVisualizer(Node):
                 self._latest_clusters = cluster_voxels
 
     def _cylinders_callback(self, msg: VCylindersFit):
+        if self.is_paused:
+            return
+            
         if not msg.cylinders:
             return
 
         wireframes = []
+        clusters_voxel = []
+        total = len(msg.cylinders)
+        valid = 0
         for i, cyl in enumerate(msg.cylinders):
+            if cyl.clouds.width > 0 and cyl.clouds.fields:
+                self.get_logger().info(
+                            f'Have cluster, {cyl.clouds.width}')   
+                points = np.array([
+                    (p[0], p[1], p[2])
+                    for p in point_cloud2.read_points(
+                        cyl.clouds, field_names=['x', 'y', 'z'])
+                ], dtype=np.float32)
+    
+                if points.shape[0] == 0:
+                    continue
+                
+                o3d_cloud = o3d.geometry.PointCloud()
+                o3d_cloud.points = o3d.utility.Vector3dVector(points)
+    
+                color = CLUSTER_COLORS[i % len(CLUSTER_COLORS)]
+                o3d_cloud.paint_uniform_color(color)
+    
+                voxel = o3d.geometry.VoxelGrid.create_from_point_cloud(
+                    o3d_cloud, voxel_size=self.voxel_size)
+    
+                # clusters_voxel.append(voxel)
             if cyl.is_valid:
+                valid += 1
                 color = CLUSTER_COLORS[i % len(CLUSTER_COLORS)]
                 lines = _make_cylinder_wireframe(
                     center_x=cyl.pose.position.x,
                     center_y=cyl.pose.position.y,
-                    base_z=cyl.pose.position.z,
+                    center_z=cyl.pose.position.z,
                     radius=cyl.radius,
                     height=cyl.height,
-                    color=color)
+                    color=color,
+                    orientation_q=cyl.pose.orientation)
                 wireframes.append(lines)
             else:
                 continue
-
+        self.get_logger().info(
+            f'Received {total} cylinders, valid: {valid}')         
         if wireframes:
             with self._lock:
-                self._latest_cylinders = wireframes
+                self._latest_cylinders = wireframes 
+                # self._latest_clusters = clusters_voxel
 
     def _tracked_cylinders_callback(self, msg: TrackedCylinderArray):
+        return
+        if self.is_paused:
+            return
+            
         if not msg.cylinders:
             return
 
@@ -207,10 +303,11 @@ class VoxelVisualizer(Node):
             lines = _make_cylinder_wireframe(
                 center_x=cyl.pose.position.x,
                 center_y=cyl.pose.position.y,
-                base_z=cyl.pose.position.z,
+                center_z=cyl.pose.position.z,
                 radius=cyl.radius,
                 height=cyl.height,
-                color=[0.9, 0.9, 0.9])
+                color=[0.9, 0.9, 0.9],
+                orientation_q=cyl.pose.orientation)
             wireframes.append(lines)
 
         if wireframes:
@@ -218,6 +315,9 @@ class VoxelVisualizer(Node):
                 self._latest_tracked_cylinders = wireframes
 
     def _odom_callback(self, msg: Odometry):
+        if self.is_paused:
+            return
+            
         with self._lock:
             self._latest_odom = msg
 
@@ -227,13 +327,14 @@ class VoxelVisualizer(Node):
         tracked_cylinders = None
         cloud = None
         odom = None
+        normals = None
+        origins = None
         with self._lock:
             if self._latest_clusters is not None:
+                
                 clusters = self._latest_clusters
                 self._latest_clusters = None
-                cylinders = self._latest_cylinders
-                self._latest_cylinders = None
-            elif self._latest_cloud is not None:
+            if self._latest_cloud is not None:
                 cloud = self._latest_cloud
                 self._latest_cloud = None
             if self._latest_odom is not None:
@@ -241,18 +342,52 @@ class VoxelVisualizer(Node):
             if self._latest_tracked_cylinders is not None:
                 tracked_cylinders = self._latest_tracked_cylinders
                 self._latest_tracked_cylinders = None
+            if self._latest_cylinders is not None:
+                cylinders = self._latest_cylinders
+                self._latest_cylinders = None
+            if self._latest_normals is not None and self._latest_origins is not None:
+                normals = self._latest_normals
+                origins = self._latest_origins
+                self._latest_normals = None
+                self._latest_origins = None
 
         if odom is not None:
             self._render_drone(odom)
 
         if clusters is not None:
-            self._render_clusters(clusters, cylinders)
-        if tracked_cylinders is not None:
+            self.get_logger().info(
+                                        f'Render cluster')
+            self._render_clusters(clusters)
+        if cylinders is not None:
+            self._render_cylinders(cylinders)
+        if tracked_cylinders:
             self._render_tracked_cylinders(tracked_cylinders)
-        elif cloud is not None:
+        if cloud is not None and False:
             self._render_point_cloud(cloud)
-        else:
-            self._vis.poll_events()
+        if normals is not None and origins is not None:
+            self._render_normals(normals, origins)
+        
+        self._vis.poll_events()
+        self._vis.update_renderer()
+
+    def _render_normals(self, normals, origins):
+        while len(self._geometries) > 1:
+            self._vis.remove_geometry(self._geometries.pop(), False)
+
+        np_origins = np.array([[p.x, p.y, p.z] for p in origins], dtype=np.float64)
+        np_normals = np.array([[n.x, n.y, n.z] for n in normals], dtype=np.float64)
+        pcd = o3d.geometry.PointCloud()
+
+        if len(np_origins) > 0:
+            pcd.points = o3d.utility.Vector3dVector(np_origins)
+            pcd.normals = o3d.utility.Vector3dVector(np_normals)
+        opt = self._vis.get_render_option()
+        opt.point_show_normal = True
+
+        self._vis.add_geometry(pcd, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+
+        self._geometries.append(pcd)
 
     def _render_point_cloud(self, voxel):
         while len(self._geometries) > 1:
@@ -262,10 +397,8 @@ class VoxelVisualizer(Node):
         self._first_frame = False
 
         self._geometries.append(voxel)
-        self._vis.poll_events()
-        self._vis.update_renderer()
 
-    def _render_clusters(self, cluster_voxels, cylinder_wireframes):
+    def _render_clusters(self, cluster_voxels):
         while len(self._geometries) > 1:
             self._vis.remove_geometry(self._geometries.pop(), False)
 
@@ -274,10 +407,18 @@ class VoxelVisualizer(Node):
             self._first_frame = False
             self._geometries.append(voxel)
 
-        if cylinder_wireframes:
-            for lines in cylinder_wireframes:
-                self._vis.add_geometry(lines, False)
-                self._geometries.append(lines)
+
+    def _render_cylinders(self, cylinder_wireframes):
+        while len(self._geometries) > 1:
+            self._vis.remove_geometry(self._geometries.pop(), False)
+
+        self.get_logger().info(
+            f'Received {len(cylinder_wireframes)} cylinders')
+        for cylinder in cylinder_wireframes:
+
+            self._vis.add_geometry(cylinder, reset_bounding_box=self._first_frame)
+            self._first_frame = False
+            self._geometries.append(cylinder)
 
 
     def _render_tracked_cylinders(self, tracked_cylinder_wireframes=None):
@@ -289,8 +430,6 @@ class VoxelVisualizer(Node):
                 self._first_frame = False
                 self._geometries.append(lines)
 
-        self._vis.poll_events()
-        self._vis.update_renderer()
 
     def _render_drone(self, odom_msg):
         if self._drone_arrow is not None:
@@ -301,8 +440,6 @@ class VoxelVisualizer(Node):
         self._drone_arrow = _make_drone_arrow(p, (q.w, q.x, q.y, q.z))
 
         self._vis.add_geometry(self._drone_arrow, False)
-        self._vis.poll_events()
-        self._vis.update_renderer()
 
     def destroy_node(self):
         self._vis.destroy_window()

@@ -17,6 +17,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/VCylindersFit.msg"
   "msg/TrackedCylinderArray.msg"
   "msg/PointCloudArray.msg"
+  "msg/XYZ.msg"
+  "msg/VNormals.msg"
   DEPENDENCIES sensor_msgs std_msgs geometry_msgs
 )
 

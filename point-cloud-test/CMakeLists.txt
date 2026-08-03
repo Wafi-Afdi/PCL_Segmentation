@@ -37,7 +37,7 @@ target_include_directories(pcl_proc PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(pcl_proc ${PCL_LIBRARIES} ${VTK_LIBRARIES})
-ament_target_dependencies(pcl_proc rclcpp)
+ament_target_dependencies(pcl_proc rclcpp pcl_cstm_msg)
 
 if (VTK_VERSION VERSION_GREATER_EQUAL "8.90.0")
   vtk_module_autoinit(
@@ -64,6 +64,24 @@ ament_target_dependencies(pcl_proc_node
   pcl_cstm_msg
 )
 
+# pcl_norm_vis
+add_executable(pcl_norm_vis src/pcl_norm_vis.cpp)
+
+target_include_directories(pcl_norm_vis PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(pcl_norm_vis ${PCL_LIBRARIES} ${VTK_LIBRARIES})
+ament_target_dependencies(pcl_norm_vis
+  rclcpp
+  std_msgs
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  pcl_conversions
+  message_filters
+  pcl_cstm_msg
+)
+
 if (VTK_VERSION VERSION_GREATER_EQUAL "8.90.0")
   vtk_module_autoinit(
     TARGETS pcl_proc_node
@@ -74,6 +92,7 @@ endif()
 install(TARGETS
   pcl_proc
   pcl_proc_node
+  pcl_norm_vis
   DESTINATION lib/${PROJECT_NAME}
 )
 

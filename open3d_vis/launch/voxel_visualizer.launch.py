@@ -6,7 +6,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     input_cloud = DeclareLaunchArgument(
-        'input_cloud_topic', default_value='/input_cloud',
+        'input_cloud_topic', default_value='/output_cloud',
         description='Input point cloud topic')
     input_clusters = DeclareLaunchArgument(
         'input_clusters_topic', default_value='/clusters',
@@ -15,7 +15,7 @@ def generate_launch_description():
         'input_cylinders_topic', default_value='/cylinders',
         description='Input cylinders topic')
     input_odom = DeclareLaunchArgument(
-        'input_odom_topic', default_value='/odom',
+        'input_odom_topic', default_value='/mavros/odometry/out',
         description='Odometry topic for drone pose')
     input_tracked_cylinders = DeclareLaunchArgument(
         'input_tracked_cylinders_topic', default_value='/global_cylinders',
