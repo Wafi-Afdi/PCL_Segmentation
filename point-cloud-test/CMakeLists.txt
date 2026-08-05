@@ -30,7 +30,7 @@ link_directories(${PCL_LIBRARY_DIRS})
 # Add PCL definitions
 add_definitions(${PCL_DEFINITIONS})
 
-# pcl_proc executable (standalone PCD processor)
+# Testing pcl proc node
 add_executable(pcl_proc src/main_pcl_proc.cpp)
 
 target_include_directories(pcl_proc PRIVATE
@@ -46,7 +46,6 @@ if (VTK_VERSION VERSION_GREATER_EQUAL "8.90.0")
   )
 endif()
 
-# pcl_proc_node executable (ROS 2 point cloud processing node)
 add_executable(pcl_proc_node src/pcl_proc_node.cpp)
 
 target_include_directories(pcl_proc_node PRIVATE
@@ -54,6 +53,24 @@ target_include_directories(pcl_proc_node PRIVATE
 )
 target_link_libraries(pcl_proc_node ${PCL_LIBRARIES} ${VTK_LIBRARIES})
 ament_target_dependencies(pcl_proc_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  pcl_conversions
+  message_filters
+  pcl_cstm_msg
+)
+
+# ZED PCL Proc Node
+add_executable(zed_pcl_proc_node src/zed_pcl_proc_node.cpp)
+
+target_include_directories(zed_pcl_proc_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(zed_pcl_proc_node ${PCL_LIBRARIES} ${VTK_LIBRARIES})
+ament_target_dependencies(zed_pcl_proc_node
   rclcpp
   std_msgs
   geometry_msgs
@@ -92,6 +109,7 @@ endif()
 install(TARGETS
   pcl_proc
   pcl_proc_node
+  zed_pcl_proc_node
   pcl_norm_vis
   DESTINATION lib/${PROJECT_NAME}
 )
