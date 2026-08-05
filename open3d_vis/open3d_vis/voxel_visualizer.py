@@ -71,6 +71,21 @@ class VoxelVisualizer(Node):
         self.declare_parameter('voxel_size', 0.1)
         self.voxel_size = self.get_parameter('voxel_size').value
 
+        self.declare_parameter('show_cloud', True)
+        self.is_show_cloud = self.get_parameter('show_cloud').get_parameter_value().bool_value
+
+        self.declare_parameter('show_cylinders', True)
+        self.is_show_cylinders = self.get_parameter('show_cylinders').get_parameter_value().bool_value
+
+        self.declare_parameter('show_clusters', True)
+        self.is_show_clusters = self.get_parameter('show_clusters').get_parameter_value().bool_value
+
+        self.declare_parameter('show_normals', False)
+        self.is_show_normals = self.get_parameter('show_normals').get_parameter_value().bool_value
+
+        self.declare_parameter('show_tracked', True)
+        self.is_show_tracked = self.get_parameter('show_tracked').get_parameter_value().bool_value
+
         self._lock = threading.Lock()
         
         # --- PAUSE STATE ---
@@ -92,6 +107,16 @@ class VoxelVisualizer(Node):
         # Register ENTER key in Open3D window (GLFW codes: 257 = Enter, 335 = Numpad Enter)
         self._vis.register_key_callback(257, self._toggle_pause)
         self._vis.register_key_callback(335, self._toggle_pause)
+
+        # Register for moving plane and showing plane
+        self._vis.register_key_callback(78, self._toggle_plane_up) # Press N to make plane go up
+        self._vis.register_key_callback(77, self._toggle_plane_down) # Press M to make plane go down
+        self._vis.register_key_callback(66, self._toggle_plane) # Press B to make plane appear or dissapear
+
+        self.is_plane_show = False
+        self.plane_z_pos = 0
+
+        self.xy_plane = None
 
         axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
         self._vis.add_geometry(axes)
@@ -140,6 +165,7 @@ class VoxelVisualizer(Node):
         self._input_thread.start()
         
         self.get_logger().info('Visualizer started. Press ENTER in the terminal or Open3D window to pause/resume.')
+        self.get_logger().info('Press B to show xy plane, Press N to make the plane go up, Press M to make the plane go down')
 
     def _toggle_pause(self, vis=None):
         """ Toggles the pause state and logs it. """
@@ -158,6 +184,8 @@ class VoxelVisualizer(Node):
                 break
 
     def _cloud_callback(self, msg: PointCloud2):
+        if self.is_show_cloud is False:
+            return 
         if self.is_paused:
             return
             
@@ -181,10 +209,30 @@ class VoxelVisualizer(Node):
         with self._lock:
             self._latest_cloud = voxel_grid
 
+    def _toggle_plane_up(self, vis=None):
+        if self.is_plane_show:
+            self.plane_z_pos += 0.1
+            self.get_logger().info(f"Plane new z pose: {self.plane_z_pos}")
+
+    def _toggle_plane(self, vis=None):
+        if self.is_plane_show:
+            self.is_plane_show = False
+            self.get_logger().info(f"Plane dissapears")
+        else:
+            self.is_plane_show = True
+            self.get_logger().info(f"Plane appears")
+
+    def _toggle_plane_down(self, vis=None):
+        if self.is_plane_show:
+            self.plane_z_pos -= 0.1
+            self.get_logger().info(f"Plane new z pose: {self.plane_z_pos}")
+
+
     def _normals_callback(self, msg: VNormals):
+        if self.is_show_normals is False:
+            return
         if self.is_paused:
             return
-            
         if not msg.normals:
             return
         normals = []
@@ -199,6 +247,8 @@ class VoxelVisualizer(Node):
                 self._latest_origins = origins
 
     def _clusters_callback(self, msg: PointCloudArray):
+        if self.is_show_clusters is False:
+            return
         if self.is_paused:
             return
             
@@ -235,6 +285,8 @@ class VoxelVisualizer(Node):
                 self._latest_clusters = cluster_voxels
 
     def _cylinders_callback(self, msg: VCylindersFit):
+        if self.is_show_cylinders is False:
+            return
         if self.is_paused:
             return
             
@@ -290,7 +342,8 @@ class VoxelVisualizer(Node):
                 # self._latest_clusters = clusters_voxel
 
     def _tracked_cylinders_callback(self, msg: TrackedCylinderArray):
-        return
+        if self.is_show_tracked is False:
+            return
         if self.is_paused:
             return
             
@@ -306,7 +359,7 @@ class VoxelVisualizer(Node):
                 center_z=cyl.pose.position.z,
                 radius=cyl.radius,
                 height=cyl.height,
-                color=[0.9, 0.9, 0.9],
+                color=[0, 0, 0],
                 orientation_q=cyl.pose.orientation)
             wireframes.append(lines)
 
@@ -353,6 +406,8 @@ class VoxelVisualizer(Node):
 
         if odom is not None:
             self._render_drone(odom)
+
+        self._render_plane()
 
         if clusters is not None:
             self.get_logger().info(
@@ -440,6 +495,34 @@ class VoxelVisualizer(Node):
         self._drone_arrow = _make_drone_arrow(p, (q.w, q.x, q.y, q.z))
 
         self._vis.add_geometry(self._drone_arrow, False)
+
+    def _render_plane(self):
+        if self.xy_plane is not None and self.is_plane_show is False:
+            self._vis.remove_geometry(self.xy_plane, False)
+            self.xy_plane = None
+
+        if self.is_plane_show:
+            if self.xy_plane is None:
+                self.xy_plane = o3d.geometry.TriangleMesh.create_box(width=20.0, height=20.0, depth=0.001)
+                self.xy_plane.compute_vertex_normals()
+                self.xy_plane.translate([-10.0, -10.0, self.plane_z_pos])
+
+                light_green = [0.6, 0.9, 0.6]
+                self.xy_plane.paint_uniform_color(light_green)
+
+                # Tambahkan ke visualizer klasik (hanya menerima geometri dan bool)
+                self._vis.add_geometry(self.xy_plane, False)
+            else:
+                self._vis.remove_geometry(self.xy_plane, False)
+                
+                self.xy_plane = o3d.geometry.TriangleMesh.create_box(width=20.0, height=20.0, depth=0.001)
+                self.xy_plane.compute_vertex_normals()
+                self.xy_plane.translate([-10.0, -10.0, self.plane_z_pos])
+                self.xy_plane.paint_uniform_color([0.6, 0.9, 0.6])
+                
+                self._vis.add_geometry(self.xy_plane, False)
+        
+
 
     def destroy_node(self):
         self._vis.destroy_window()
