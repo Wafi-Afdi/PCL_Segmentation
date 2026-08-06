@@ -20,6 +20,10 @@ def generate_launch_description():
     output_cylinders = DeclareLaunchArgument(
         'output_cylinders', default_value='/cylinders',
     description='Output clusters of trees')
+    use_transform_pcl = DeclareLaunchArgument(
+        'use_transform_pcl', default_value='true',
+        description='Transform Z forward to Z up from pcl'
+    )
 
     return LaunchDescription([
         input_cloud,
@@ -27,6 +31,7 @@ def generate_launch_description():
         output_cloud,
         output_cluster,
         output_cylinders,
+        use_transform_pcl,
         Node(
             package='point-cloud-test',
             executable='pcl_proc_node',
@@ -40,5 +45,8 @@ def generate_launch_description():
                 ('/cylinders', LaunchConfiguration('output_cylinders')),
                 ('/global/cylinders', '/global_cylinders'),
             ],
+            parameters={
+                'use_transform_pcl': LaunchConfiguration('use_transform_pcl')
+            }
         ),
     ])

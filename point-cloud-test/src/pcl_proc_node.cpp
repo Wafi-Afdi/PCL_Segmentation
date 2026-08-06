@@ -42,6 +42,8 @@ namespace point_cloud_test
     PclProcNode()
         : Node("pcl_proc_node")
     {
+      this->declare_parameter("use_transform_pcl", true);
+
       rclcpp::SubscriptionOptions sub_opts;
       rclcpp::CallbackGroup::SharedPtr sync_cb_group = create_callback_group(
           rclcpp::CallbackGroupType::Reentrant);
@@ -149,10 +151,17 @@ namespace point_cloud_test
         Eigen::Matrix3f R = rotation.toRotationMatrix();
         Eigen::Vector3f t(pos.x, pos.y, pos.z);
 
+        bool is_use_transform_pcl = this->get_parameter("use_transform_pcl").as_bool();
+
         for (const auto &pt : filtered->points)
         {
           Eigen::Vector3f optical_pt(pt.x, pt.y, pt.z);
-          Eigen::Vector3f robot_pt = R_optical_to_robot_ * optical_pt;
+          Eigen::Vector3f robot_pt;
+          if (is_use_transform_pcl) {
+            robot_pt = R_optical_to_robot_ * optical_pt;
+          } else {
+            robot_pt = optical_pt;
+          }
           Eigen::Vector3f global_pt = R * robot_pt + t;
           pcl::PointXYZ p;
           p.x = global_pt.x();
