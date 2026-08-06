@@ -155,7 +155,15 @@ namespace point_cloud_test
 
         for (const auto &pt : filtered->points)
         {
+          if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+            continue;
+          }
           Eigen::Vector3f optical_pt(pt.x, pt.y, pt.z);
+
+          if (optical_pt.norm() > 20.0f) {
+            continue; 
+          }
+          
           Eigen::Vector3f robot_pt;
           if (is_use_transform_pcl) {
             robot_pt = R_optical_to_robot_ * optical_pt;

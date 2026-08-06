@@ -152,7 +152,15 @@ namespace point_cloud_test
 
         for (const auto &pt : filtered->points)
         {
+          if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+            continue;
+          }
+          
           Eigen::Vector3f robot_pt(pt.x, pt.y, pt.z);
+
+          if (robot_pt.norm() > 20.0f) {
+            continue; 
+          }
           Eigen::Vector3f global_pt = R * robot_pt + t;
           pcl::PointXYZ p;
           p.x = global_pt.x();
