@@ -17,6 +17,7 @@
 #include <pcl/console/print.h>
 #include <pcl/filters/statistical_outlier_removal.h>
 #include <pcl/filters/random_sample.h>
+#include <pcl/filters/crop_box.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -43,19 +44,56 @@ namespace point_cloud_test
     PclProcNode()
         : Node("zed_pcl_proc_node")
     {
+      int clustering_method_params = 1;
+      this->declare_parameter<bool>("use_odom_pcl_pair", true);
+      this->declare_parameter<float>("voxel_size", 0.3);
+      this->declare_parameter<int>("max_pcl_points", 450000);
+      this->declare_parameter<int>("callback_time", 500);
+
+      // clustering params
+      this->declare_parameter<int>("clustering_params.method", 0);
+      this->declare_parameter<float>("clustering_params.euclidean_clustering.max_z_mean", 0.4);
+      this->declare_parameter<float>("clustering_params.euclidean_clustering.max_z_variance", 0.1);
+      this->declare_parameter<float>("clustering_params.euclidean_clustering.distance_tolerance", 0.5);
+      this->declare_parameter<float>("clustering_params.region_growing.max_degrees", 3.0);
+      this->declare_parameter<float>("clustering_params.region_growing.curvature_threshold", 1.0);
+
+      this->get_parameter("clustering_params.method", clustering_method_params);
+      this->get_parameter("clustering_params.euclidean_clustering.max_z_mean", euclidean_max_z_mean);
+      this->get_parameter("clustering_params.euclidean_clustering.max_z_variance", euclidean_max_z_variance);
+      this->get_parameter("clustering_params.euclidean_clustering.distance_tolerance", euclidean_max_distance);
+      this->get_parameter("clustering_params.region_growing.max_degrees", regionGrowing_max_degrees);
+      this->get_parameter("clustering_params.region_growing.curvature_threshold", regionGrowing_curvature_threshold);
+      this->clustering_method = this->castClusteringMethod(clustering_method_params);
+
+      bool is_use_odom_pcl_pair = false;
+      int callback_time = 500;
+
+      this->get_parameter("use_odom_pcl_pair", is_use_odom_pcl_pair);
+      this->get_parameter("voxel_size", voxel_size);
+      this->get_parameter("max_pcl_points", max_pcl_points);
+      this->get_parameter("callback_time", callback_time);
+
       rclcpp::SubscriptionOptions sub_opts;
       rclcpp::CallbackGroup::SharedPtr sync_cb_group = create_callback_group(
           rclcpp::CallbackGroupType::Reentrant);
       sub_opts.callback_group = sync_cb_group;
 
       cloud_sub_.subscribe(this, "/input_cloud",
-                           rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
-      pose_sub_.subscribe(this, "/pose",
-                          rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
+                            rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
 
-      sync_ = std::make_shared<Synchronizer>(
-          SyncPolicy(100), cloud_sub_, pose_sub_);
-      sync_->registerCallback(&PclProcNode::sync_callback, this);
+      if (is_use_odom_pcl_pair) {
+        odom_sub_.subscribe(this, "/odom", rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
+        sync_PCL_Odometry_ = std::make_shared<SynchronizerPCLAndOdometry>(
+            SyncPolicyPCLAndOdometry(10), cloud_sub_, odom_sub_);
+        sync_PCL_Odometry_->registerCallback(&PclProcNode::sync_callback_odom_pcl, this);
+      } else {
+        pose_sub_.subscribe(this, "/pose", rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
+        sync_PCL_PoseStamped_ = std::make_shared<SynchronizerPCLAndPoseStamped>(
+            SyncPolicyPCLAndPoseStamped(10), cloud_sub_, pose_sub_);
+        sync_PCL_PoseStamped_->registerCallback(&PclProcNode::sync_callback_pose_pcl, this);
+      }
+      
 
       cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
           "/output_cloud", rclcpp::SensorDataQoS());
@@ -70,18 +108,36 @@ namespace point_cloud_test
           "/global/cylinders", rclcpp::SensorDataQoS());
 
       timer_ = create_wall_timer(
-          std::chrono::milliseconds(500),
+          std::chrono::milliseconds(callback_time),
           [this]()
           { timer_callback(); });
     }
 
   private:
-    void sync_callback(
+    ClusteringMethod castClusteringMethod(int input) {
+      if (input < 0 || input > 1) {
+        return EuclideanClustering;
+      } else {
+        return static_cast<ClusteringMethod>(input);
+      }
+    }
+    void sync_callback_pose_pcl(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
         const geometry_msgs::msg::PoseStamped::ConstSharedPtr &pose_msg)
     {
       std::lock_guard<std::mutex> lock(swap_mutex_);
-      write_buffer_->push_back({cloud_msg, pose_msg});
+      write_buffer_->emplace_back(CloudPosePair{cloud_msg, pose_msg});
+    }
+
+    void sync_callback_odom_pcl(
+        const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
+        const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
+    {
+      auto pose_ptr = std::make_shared<geometry_msgs::msg::PoseStamped>();
+      pose_ptr->pose = odom_msg->pose.pose;
+      pose_ptr->header = odom_msg->header;
+      std::lock_guard<std::mutex> lock(swap_mutex_);
+      write_buffer_->emplace_back(CloudPosePair{cloud_msg, pose_ptr});
     }
 
     void timer_callback()
@@ -102,11 +158,17 @@ namespace point_cloud_test
       // Reduce ke 700k jika lebih dari 1,2 juta point cloud
 
       int total_point_clouds = 0;
+      int processed_count = 0;
       for (const auto &pair : *to_process)
       {
+        if (processed_count >= 7)
+        {
+          break; // Stop the loop after 7 pairs
+        }
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::fromROSMsg(*pair.cloud, *cloud);
         total_point_clouds += (cloud->width * cloud->height);
+        processed_count++;
       }
 
       pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(
@@ -114,28 +176,52 @@ namespace point_cloud_test
 
       auto time_filter_start = std::chrono::high_resolution_clock::now();
 
-      for (const auto &pair : *to_process)
+      processed_count = 0;
+      for (auto it = to_process->rbegin(); it != to_process->rend(); ++it)
       {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::fromROSMsg(*pair.cloud, *cloud);
+        if (processed_count >= 8)
+        {
+          break; 
+        }
+        const auto &pair = *it;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_raw(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_NoNaN(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::fromROSMsg(*pair.cloud, *cloud_raw);
+        std::vector<int> mapping_indices; // Menyimpan indeks poin yang valid
+        pcl::removeNaNFromPointCloud(*cloud_raw, *cloud_NoNaN, mapping_indices);
+        
+        pcl::CropBox<pcl::PointXYZ> crop_box;
+        crop_box.setInputCloud(cloud_NoNaN);
+
+        Eigen::Vector4f min_pt(-10.0f, -10.0f, -5.0f, 1.0f); 
+        crop_box.setMin(min_pt);
+        Eigen::Vector4f max_pt(10.0f, 10.0f, 5.0f, 1.0f);
+        crop_box.setMax(max_pt);
+
+        crop_box.filter(*cloud_filtered);
+
         pcl::RandomSample<pcl::PointXYZ> random_sampler;
 
-        if (total_point_clouds > 1200000)
+        if (total_point_clouds > max_pcl_points)
         {
-          //RCLCPP_INFO(get_logger(), "Resampling");
+          // RCLCPP_INFO(get_logger(), "Resampling");
           pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_sampled(new pcl::PointCloud<pcl::PointXYZ>);
-          unsigned int samples_per_pair = (600000 / to_process->size());
-          random_sampler.setInputCloud(cloud);
+          unsigned int samples_per_pair = (max_pcl_points / to_process->size());
+          random_sampler.setInputCloud(cloud_filtered);
           random_sampler.setSample(samples_per_pair);
 
           random_sampler.filter(*cloud_sampled);
-          cloud = cloud_sampled;
+          cloud_filtered = cloud_sampled;
         }
+
+
 
         pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::VoxelGrid<pcl::PointXYZ> voxel;
-        voxel.setInputCloud(cloud);
-        voxel.setLeafSize(0.3f, 0.3f, 0.3f);
+        voxel.setInputCloud(cloud_filtered);
+        voxel.setLeafSize(voxel_size, voxel_size, voxel_size);
         voxel.filter(*filtered);
 
         pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
@@ -152,14 +238,16 @@ namespace point_cloud_test
 
         for (const auto &pt : filtered->points)
         {
-          if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) {
+          if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
+          {
             continue;
           }
-          
+
           Eigen::Vector3f robot_pt(pt.x, pt.y, pt.z);
 
-          if (robot_pt.norm() > 20.0f) {
-            continue; 
+          if (robot_pt.norm() > 20.0f)
+          {
+            continue;
           }
           Eigen::Vector3f global_pt = R * robot_pt + t;
           pcl::PointXYZ p;
@@ -168,6 +256,7 @@ namespace point_cloud_test
           p.z = global_pt.z();
           merged_cloud->push_back(p);
         }
+        processed_count++;
       }
 
       auto time_filter_end = std::chrono::high_resolution_clock::now();
@@ -206,7 +295,14 @@ namespace point_cloud_test
       cloud_pub_->publish(output_msg);
 
       auto time_cluster_start = std::chrono::high_resolution_clock::now();
-      auto clusters = clusterTrees_RegionGrowing(trunk_filter, 5, 1);
+      std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
+      if (clustering_method == RegionGrowing) {
+        clusters = clusterTrees_RegionGrowing(trunk_filter, regionGrowing_max_degrees, regionGrowing_curvature_threshold);
+      } else if (clustering_method == EuclideanClustering) {
+        clusters = clusterTrees(trunk_filter, euclidean_max_z_mean, euclidean_max_z_variance);
+      } else {
+        clusters = clusterTrees(trunk_filter);
+      }
       auto time_cluster_end = std::chrono::high_resolution_clock::now();
 
       double time_cluster_ms =
@@ -365,11 +461,18 @@ namespace point_cloud_test
 
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloud_sub_;
     message_filters::Subscriber<geometry_msgs::msg::PoseStamped> pose_sub_;
+    message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_;
 
-    using SyncPolicy = message_filters::sync_policies::ApproximateTime<
+    using SyncPolicyPCLAndOdometry = message_filters::sync_policies::ApproximateTime<
+        sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>;
+    using SyncPolicyPCLAndPoseStamped = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::PointCloud2, geometry_msgs::msg::PoseStamped>;
-    using Synchronizer = message_filters::Synchronizer<SyncPolicy>;
-    std::shared_ptr<Synchronizer> sync_;
+
+    using SynchronizerPCLAndPoseStamped = message_filters::Synchronizer<SyncPolicyPCLAndPoseStamped>;
+    std::shared_ptr<SynchronizerPCLAndPoseStamped> sync_PCL_PoseStamped_;
+
+    using SynchronizerPCLAndOdometry = message_filters::Synchronizer<SyncPolicyPCLAndOdometry>;
+    std::shared_ptr<SynchronizerPCLAndOdometry> sync_PCL_Odometry_;
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::PointCloudArray>::SharedPtr cluster_pub_;
@@ -384,6 +487,16 @@ namespace point_cloud_test
     std::mutex swap_mutex_;
 
     GlobalCylinderManager global_manager_{2.0f};
+
+    float voxel_size = 0.3f;
+    int max_pcl_points = 450000;
+
+    ClusteringMethod clustering_method = EuclideanClustering;
+    float euclidean_max_z_mean = 0.4;
+    float euclidean_max_z_variance = 0.1;
+    float euclidean_max_distance = 0.5;
+    float regionGrowing_max_degrees = 3.0;
+    float regionGrowing_curvature_threshold = 1.0;
   };
 
 } // namespace point_cloud_test

@@ -2,6 +2,7 @@ import threading
 import sys
 
 import numpy as np
+import matplotlib.pyplot as plt
 import open3d as o3d
 import rclpy
 from rclpy.node import Node
@@ -100,6 +101,14 @@ class VoxelVisualizer(Node):
         self._latest_odom = None
         self._first_frame = True
 
+        # Persistent 3d object
+        self._current_cloud_geom = None
+        self._current_cluster_geoms = []
+        self._current_cylinder_geoms = []
+        self._current_tracked_geoms = []
+        self._current_normal_geom = None
+        self._drone_arrow = None
+
         self._vis = o3d.visualization.VisualizerWithKeyCallback()
         self._vis.create_window(window_name='Point Cloud Voxels (Press ENTER to Pause)',
                                 width=1024, height=768)
@@ -121,8 +130,6 @@ class VoxelVisualizer(Node):
         axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
         self._vis.add_geometry(axes)
         self._geometries = [axes]
-
-        self._drone_arrow = None
 
         self._sub = self.create_subscription(
             PointCloud2,
@@ -203,8 +210,24 @@ class VoxelVisualizer(Node):
         o3d_cloud = o3d.geometry.PointCloud()
         o3d_cloud.points = o3d.utility.Vector3dVector(points)
 
+        z_vals = points[:, 2]
+        z_min, z_max = z_vals.min(), z_vals.max()
+
+        if z_max > z_min:
+            z_norm = (z_vals - z_min) / (z_max - z_min)
+        else:
+            z_norm = np.zeros_like(z_vals)
+        
+        cmap = plt.get_cmap('jet')
+        colors = cmap(z_norm)[:, :3]
+        o3d_cloud.colors = o3d.utility.Vector3dVector(colors)
+
         voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(
             o3d_cloud, voxel_size=self.voxel_size)
+
+        
+        self.get_logger().info(
+                f'There is point clouds')
 
         with self._lock:
             self._latest_cloud = voxel_grid
@@ -383,108 +406,101 @@ class VoxelVisualizer(Node):
         normals = None
         origins = None
         with self._lock:
-            if self._latest_clusters is not None:
-                
-                clusters = self._latest_clusters
-                self._latest_clusters = None
-            if self._latest_cloud is not None:
-                cloud = self._latest_cloud
-                self._latest_cloud = None
-            if self._latest_odom is not None:
-                odom = self._latest_odom
-            if self._latest_tracked_cylinders is not None:
-                tracked_cylinders = self._latest_tracked_cylinders
-                self._latest_tracked_cylinders = None
-            if self._latest_cylinders is not None:
-                cylinders = self._latest_cylinders
-                self._latest_cylinders = None
-            if self._latest_normals is not None and self._latest_origins is not None:
-                normals = self._latest_normals
-                origins = self._latest_origins
-                self._latest_normals = None
-                self._latest_origins = None
+            cloud = self._latest_cloud
+            self._latest_cloud = None
+            
+            clusters = self._latest_clusters
+            self._latest_clusters = None
+            
+            cylinders = self._latest_cylinders
+            self._latest_cylinders = None
+            
+            tracked_cylinders = self._latest_tracked_cylinders
+            self._latest_tracked_cylinders = None
+            
+            normals = self._latest_normals
+            origins = self._latest_origins
+            self._latest_normals = None
+            self._latest_origins = None
+            
+            odom = self._latest_odom
 
+        if cloud is not None:
+            self._update_point_cloud(cloud)
+            
+        if clusters is not None:
+            self._update_clusters(clusters)
+            
+        if cylinders is not None:
+            self._update_cylinders(cylinders)
+            
+        if tracked_cylinders is not None:
+            self._update_tracked_cylinders(tracked_cylinders)
+            
+        if normals is not None and origins is not None:
+            self._update_normals(normals, origins)
+            
         if odom is not None:
             self._render_drone(odom)
-
+        
         self._render_plane()
-
-        if clusters is not None:
-            self.get_logger().info(
-                                        f'Render cluster')
-            self._render_clusters(clusters)
-        if cylinders is not None:
-            self._render_cylinders(cylinders)
-        if tracked_cylinders:
-            self._render_tracked_cylinders(tracked_cylinders)
-        if cloud is not None and False:
-            self._render_point_cloud(cloud)
-        if normals is not None and origins is not None:
-            self._render_normals(normals, origins)
         
         self._vis.poll_events()
         self._vis.update_renderer()
 
-    def _render_normals(self, normals, origins):
-        while len(self._geometries) > 1:
-            self._vis.remove_geometry(self._geometries.pop(), False)
+    def _update_point_cloud(self, voxel):
+        if self._current_cloud_geom is not None:
+            self._vis.remove_geometry(self._current_cloud_geom, False)
+        
+        self._current_cloud_geom = voxel
+        self._vis.add_geometry(self._current_cloud_geom, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+
+    def _update_clusters(self, cluster_voxels):
+        for geom in self._current_cluster_geoms:
+            self._vis.remove_geometry(geom, False)
+            
+        self._current_cluster_geoms = cluster_voxels
+        for geom in self._current_cluster_geoms:
+            self._vis.add_geometry(geom, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+
+    def _update_cylinders(self, cylinder_wireframes):
+        for geom in self._current_cylinder_geoms:
+            self._vis.remove_geometry(geom, False)
+            
+        self._current_cylinder_geoms = cylinder_wireframes
+        for geom in self._current_cylinder_geoms:
+            self._vis.add_geometry(geom, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+
+    def _update_tracked_cylinders(self, tracked_cylinder_wireframes):
+        for geom in self._current_tracked_geoms:
+            self._vis.remove_geometry(geom, False)
+            
+        self._current_tracked_geoms = tracked_cylinder_wireframes
+        for geom in self._current_tracked_geoms:
+            self._vis.add_geometry(geom, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+
+    def _update_normals(self, normals, origins):
+        if self._current_normal_geom is not None:
+            self._vis.remove_geometry(self._current_normal_geom, False)
 
         np_origins = np.array([[p.x, p.y, p.z] for p in origins], dtype=np.float64)
         np_normals = np.array([[n.x, n.y, n.z] for n in normals], dtype=np.float64)
+        
         pcd = o3d.geometry.PointCloud()
-
         if len(np_origins) > 0:
             pcd.points = o3d.utility.Vector3dVector(np_origins)
             pcd.normals = o3d.utility.Vector3dVector(np_normals)
+
+        self._current_normal_geom = pcd
+        self._vis.add_geometry(self._current_normal_geom, reset_bounding_box=self._first_frame)
+        
         opt = self._vis.get_render_option()
         opt.point_show_normal = True
-
-        self._vis.add_geometry(pcd, reset_bounding_box=self._first_frame)
         self._first_frame = False
-
-        self._geometries.append(pcd)
-
-    def _render_point_cloud(self, voxel):
-        while len(self._geometries) > 1:
-            self._vis.remove_geometry(self._geometries.pop(), False)
-
-        self._vis.add_geometry(voxel, reset_bounding_box=self._first_frame)
-        self._first_frame = False
-
-        self._geometries.append(voxel)
-
-    def _render_clusters(self, cluster_voxels):
-        while len(self._geometries) > 1:
-            self._vis.remove_geometry(self._geometries.pop(), False)
-
-        for voxel in cluster_voxels:
-            self._vis.add_geometry(voxel, reset_bounding_box=self._first_frame)
-            self._first_frame = False
-            self._geometries.append(voxel)
-
-
-    def _render_cylinders(self, cylinder_wireframes):
-        while len(self._geometries) > 1:
-            self._vis.remove_geometry(self._geometries.pop(), False)
-
-        self.get_logger().info(
-            f'Received {len(cylinder_wireframes)} cylinders')
-        for cylinder in cylinder_wireframes:
-
-            self._vis.add_geometry(cylinder, reset_bounding_box=self._first_frame)
-            self._first_frame = False
-            self._geometries.append(cylinder)
-
-
-    def _render_tracked_cylinders(self, tracked_cylinder_wireframes=None):
-        if tracked_cylinder_wireframes:
-            self.get_logger().info(
-                        f'Received {len(tracked_cylinder_wireframes)} tracked cylinders')
-            for lines in tracked_cylinder_wireframes:
-                self._vis.add_geometry(lines, reset_bounding_box=self._first_frame)
-                self._first_frame = False
-                self._geometries.append(lines)
-
 
     def _render_drone(self, odom_msg):
         if self._drone_arrow is not None:

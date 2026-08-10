@@ -27,6 +27,11 @@
 #include "pcl_cstm_msg/msg/v_normals.hpp"
 #include "pcl_cstm_msg/msg/xyz.hpp"
 
+enum ClusteringMethod {
+    RegionGrowing,   // 0
+    EuclideanClustering, // 1
+};
+
 inline pcl::PointCloud<pcl::PointXYZ>::Ptr processPMF(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
@@ -127,7 +132,9 @@ inline pcl::PointCloud<pcl::PointXYZ>::Ptr processRANSAC(
 inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_trees,
     double max_z_mean = 0.4,
-    double max_z_variance = 0.1)
+    double max_z_variance = 0.1,
+    float ecTolerance = 0.5
+  )
 {
   // std::cout << "Starting Euclidean Clustering to isolate trees..." << std::endl;
 
@@ -138,10 +145,10 @@ inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees(
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
 
-  ec.setClusterTolerance(0.5);
+  ec.setClusterTolerance(ecTolerance);
 
   ec.setMinClusterSize(40);
-  ec.setMaxClusterSize(2000);
+  ec.setMaxClusterSize(5000);
 
   ec.setSearchMethod(tree_search);
   ec.setInputCloud(cloud_trees);
@@ -237,9 +244,9 @@ inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees_RegionGrowi
 
   pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> reg;
   reg.setMinClusterSize(40);   // Retained your original min size
-  reg.setMaxClusterSize(2000); // Retained your original max size
+  reg.setMaxClusterSize(5000); // Retained your original max size
   reg.setSearchMethod(tree);
-  reg.setNumberOfNeighbours(30);
+  reg.setNumberOfNeighbours(5);
   reg.setInputCloud(cloud_trees);
   reg.setIndices(indices);
   reg.setInputNormals(normals);
@@ -302,7 +309,7 @@ inline CylinderParams fitCylinderZAxis(
   pcl::PointXYZ minPt, maxPt;
   pcl::getMinMax3D(*cluster, minPt, maxPt);
   
-  if (minPt.z >= 0.5f)
+  if (minPt.z >= 0.5f || minPt.z <= -0.5f)
   {
     // Poin terendah tidak boleh melayang
     return result; 

@@ -1,16 +1,20 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
     input_cloud = DeclareLaunchArgument(
         'input_cloud_topic', default_value='/zed/zed_node/pointclouds/registerd',
         description='Input point cloud topic')
-    pose = DeclareLaunchArgument(
+    pose_topic = DeclareLaunchArgument(
         'pose_topic', default_value='/zed/zed_node/pose',
         description='poseetry topic')
+    odom_topic = DeclareLaunchArgument(
+            'odom_topic', default_value='/zed/zed_node/odom',
+            description='odometry zed topic')
     output_cloud = DeclareLaunchArgument(
         'output_cloud_topic', default_value='/output_cloud',
         description='Output global point cloud topic')
@@ -20,13 +24,25 @@ def generate_launch_description():
     output_cylinders = DeclareLaunchArgument(
         'output_cylinders', default_value='/cylinders',
     description='Output clusters of trees')
+    yaml_params_file = DeclareLaunchArgument(
+        'yaml_params_file',default_value=[
+        PathJoinSubstitution([
+                FindPackageShare('point-cloud-test'),
+                'config',
+                'zed_node_params.yaml'
+            ])
+        ],
+        description='Path to the YAML parameter file'
+    )
 
     return LaunchDescription([
         input_cloud,
-        pose,
+        pose_topic,
+        odom_topic,
         output_cloud,
         output_cluster,
         output_cylinders,
+        yaml_params_file,
         Node(
             package='point-cloud-test',
             executable='zed_pcl_proc_node',
@@ -35,10 +51,14 @@ def generate_launch_description():
             remappings=[
                 ('/input_cloud', LaunchConfiguration('input_cloud_topic')),
                 ('/pose', LaunchConfiguration('pose_topic')),
+                ('/odom', LaunchConfiguration('odom_topic')),
                 ('/output_cloud', LaunchConfiguration('output_cloud_topic')),
                 ('/clusters', LaunchConfiguration('output_cluster')),
                 ('/cylinders', LaunchConfiguration('output_cylinders')),
                 ('/global/cylinders', '/global_cylinders'),
             ],
+            parameters=[
+                LaunchConfiguration('yaml_params_file'),
+            ]
         ),
     ])
