@@ -182,7 +182,7 @@ namespace point_cloud_test
         for (const auto &obj : latest_object_det_->objects)
         {
 
-          auto params = fitCylinderZAxis(obj);
+          auto params = fitCylinderZAxis(obj, *to_process->back().pose);
           params_vec.push_back(params);
 
           pcl_cstm_msg::msg::CylinderFit cyl_msg;

@@ -28,6 +28,8 @@
 #include "pcl_cstm_msg/msg/xyz.hpp"
 
 #include "zed_msgs/msg/object.hpp"
+#include <geometry_msgs/msg/pose_stamped.hpp>
+
 
 enum ClusteringMethod {
     RegionGrowing,   // 0
@@ -321,7 +323,8 @@ struct CylinderParams
 };
 
 inline CylinderParams fitCylinderZAxis(
-    const zed_msgs::msg::Object &object_det)
+    const zed_msgs::msg::Object &object_det
+  )
 {
   CylinderParams result;
 
@@ -341,6 +344,80 @@ inline CylinderParams fitCylinderZAxis(
   result.dir_y = 0.0f;
   result.dir_z = 1.0f;
 
+  result.height = object_det.dimensions_3d[2];
+  
+  float width = (getCorner(3) - getCorner(0)).norm();
+  float depth = (getCorner(1) - getCorner(0)).norm();
+  float average_diameter = (width + depth) / 2.0f;
+  result.radius = average_diameter / 2.0f;
+
+  result.confidence = object_det.confidence; 
+
+  // 5. Ignore Point Clouds as requested
+  result.clouds = nullptr; 
+  result.isValid = true;
+
+  return result;
+}
+
+
+// Local to Global
+inline CylinderParams fitCylinderZAxis(
+    const zed_msgs::msg::Object &object_det,
+    const geometry_msgs::msg::PoseStamped &global_pose)
+{
+  CylinderParams result;
+
+  auto getCorner = [&](int idx) {
+      return Eigen::Vector3f(
+          object_det.bounding_box_3d.corners[idx].kp[0],
+          object_det.bounding_box_3d.corners[idx].kp[1],
+          object_det.bounding_box_3d.corners[idx].kp[2]
+      );
+  };
+
+  // 1. Extract Global Rotation (Quaternion) and Translation (Vector)
+  // Warning: Eigen::Quaternionf constructor expects arguments in (w, x, y, z) order!
+  Eigen::Quaternionf q_global(
+      global_pose.pose.orientation.w,
+      global_pose.pose.orientation.x,
+      global_pose.pose.orientation.y,
+      global_pose.pose.orientation.z
+  );
+  
+  Eigen::Vector3f t_global(
+      global_pose.pose.position.x,
+      global_pose.pose.position.y,
+      global_pose.pose.position.z
+  );
+
+  // 2. Transform the Local Center Position to Global Position
+  Eigen::Vector3f local_center(
+      object_det.position[0], 
+      object_det.position[1], 
+      object_det.position[2]
+  );
+  
+  // Math: P_global = (Rotation * P_local) + Translation
+  Eigen::Vector3f global_center = q_global * local_center + t_global;
+
+  result.center_x = global_center.x();
+  result.center_y = global_center.y();
+  result.center_z = global_center.z();
+
+  // 3. Transform the Local Direction (Tilt) to Global Direction
+  // Assuming the object stands straight up (Z-axis) in the *local* camera frame,
+  // we must rotate this vector to see how it points in the global frame.
+  Eigen::Vector3f local_dir(0.0f, 0.0f, 1.0f);
+  
+  // Math: D_global = Rotation * D_local (Direction vectors are not translated, only rotated)
+  Eigen::Vector3f global_dir = q_global * local_dir;
+  
+  result.dir_x = global_dir.x();
+  result.dir_y = global_dir.y();
+  result.dir_z = global_dir.z();
+
+  // 4. Dimensions (Size remains the same regardless of coordinate frame)
   result.height = object_det.dimensions_3d[2];
   
   float width = (getCorner(3) - getCorner(0)).norm();
