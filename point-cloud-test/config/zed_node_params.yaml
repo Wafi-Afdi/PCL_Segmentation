@@ -7,9 +7,11 @@ zed_pcl_proc_node:
     clustering_params:
       method: 1 # 0 is RegionGrowing, 1 is EuclideanCluster
       euclidean_clustering:
-        max_z_mean: 0.4
+        max_z_mean: 0.2
         max_z_variance: 0.1 
         distance_tolerance: 1.0
       region_growing:
-        max_degrees: 3.0
-        curvature_threshold: 1.0
+        max_degrees: 10.0
+        curvature_threshold: 2.0
+    ground_removal:
+      method: 1 # 0 is PMF, 1 is RANSAC

@@ -45,10 +45,18 @@ namespace point_cloud_test
         : Node("zed_pcl_proc_node")
     {
       int clustering_method_params = 1;
+      int ground_removal_method_params = 1;
+
       this->declare_parameter<bool>("use_odom_pcl_pair", true);
       this->declare_parameter<float>("voxel_size", 0.3);
       this->declare_parameter<int>("max_pcl_points", 450000);
       this->declare_parameter<int>("callback_time", 500);
+
+      // ground removal
+      this->declare_parameter<int>("ground_removal.method", 1);
+      
+      this->get_parameter("ground_removal.method", ground_removal_method_params);
+      this->ground_removal_method = castGroundRemovalMethod(ground_removal_method_params);
 
       // clustering params
       this->declare_parameter<int>("clustering_params.method", 0);
@@ -57,6 +65,7 @@ namespace point_cloud_test
       this->declare_parameter<float>("clustering_params.euclidean_clustering.distance_tolerance", 0.5);
       this->declare_parameter<float>("clustering_params.region_growing.max_degrees", 3.0);
       this->declare_parameter<float>("clustering_params.region_growing.curvature_threshold", 1.0);
+      
 
       this->get_parameter("clustering_params.method", clustering_method_params);
       this->get_parameter("clustering_params.euclidean_clustering.max_z_mean", euclidean_max_z_mean);
@@ -64,7 +73,7 @@ namespace point_cloud_test
       this->get_parameter("clustering_params.euclidean_clustering.distance_tolerance", euclidean_max_distance);
       this->get_parameter("clustering_params.region_growing.max_degrees", regionGrowing_max_degrees);
       this->get_parameter("clustering_params.region_growing.curvature_threshold", regionGrowing_curvature_threshold);
-      this->clustering_method = this->castClusteringMethod(clustering_method_params);
+      this->clustering_method = castClusteringMethod(clustering_method_params);
 
       bool is_use_odom_pcl_pair = false;
       int callback_time = 500;
@@ -114,13 +123,7 @@ namespace point_cloud_test
     }
 
   private:
-    ClusteringMethod castClusteringMethod(int input) {
-      if (input < 0 || input > 1) {
-        return EuclideanClustering;
-      } else {
-        return static_cast<ClusteringMethod>(input);
-      }
-    }
+
     void sync_callback_pose_pcl(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
         const geometry_msgs::msg::PoseStamped::ConstSharedPtr &pose_msg)
@@ -271,7 +274,12 @@ namespace point_cloud_test
       merged_cloud->is_dense = true;
 
       auto time_ransac_start = std::chrono::high_resolution_clock::now();
-      auto non_ground = processRANSAC(merged_cloud);
+      std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> non_ground;
+      if (ground_removal_method == PMF) {
+        non_ground = processPMF(merged_cloud);
+      } else {
+        non_ground = processRANSAC(merged_cloud);
+      }
       if (!non_ground || non_ground->empty())
       {
         RCLCPP_WARN(get_logger(), "Ground removal failed");
@@ -283,7 +291,7 @@ namespace point_cloud_test
           std::chrono::duration_cast<std::chrono::microseconds>(time_ransac_end - time_ransac_start)
               .count() /
           1000.0;
-      RCLCPP_INFO(get_logger(), "Total Time RANSAC: %lf ms", time_ransac_ms);
+      RCLCPP_INFO(get_logger(), "Total Time Ground Removal: %lf ms", time_ransac_ms);
 
       auto trunk_filter = removeNonNormals(non_ground);
 
@@ -490,6 +498,8 @@ namespace point_cloud_test
 
     float voxel_size = 0.3f;
     int max_pcl_points = 450000;
+
+    GroundRemovalMethod ground_removal_method = RANSAC;
 
     ClusteringMethod clustering_method = EuclideanClustering;
     float euclidean_max_z_mean = 0.4;

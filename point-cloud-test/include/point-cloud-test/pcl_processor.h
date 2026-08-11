@@ -32,11 +32,33 @@ enum ClusteringMethod {
     EuclideanClustering, // 1
 };
 
+enum GroundRemovalMethod {
+    PMF,   // 0
+    RANSAC, // 1
+};
+
+
+inline ClusteringMethod castClusteringMethod(int input) {
+    if (input < 0 || input > 1) {
+      return EuclideanClustering;
+    } else {
+      return static_cast<ClusteringMethod>(input);
+    }
+  }
+
+inline GroundRemovalMethod castGroundRemovalMethod(int input) {
+  if (input < 0 || input > 1) {
+    return RANSAC;
+  } else {
+    return static_cast<GroundRemovalMethod>(input);
+  }
+}
+
 inline pcl::PointCloud<pcl::PointXYZ>::Ptr processPMF(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
 {
-  std::cout << "Starting Progressive Morphological Filter (PMF) ground removal..."
-            << std::endl;
+  // std::cout << "Starting Progressive Morphological Filter (PMF) ground removal..."
+  //           << std::endl;
   pcl::PointIndices::Ptr ground_inliers(new pcl::PointIndices());
   pcl::ProgressiveMorphologicalFilter<pcl::PointXYZ> pmf;
 
@@ -58,8 +80,8 @@ inline pcl::PointCloud<pcl::PointXYZ>::Ptr processPMF(
   extract.setNegative(true);
   extract.filter(*cloud_trees);
 
-  std::cout << "Remaining tree points: "
-            << cloud_trees->width * cloud_trees->height << std::endl;
+  // std::cout << "Remaining tree points: "
+  //           << cloud_trees->width * cloud_trees->height << std::endl;
 
   return cloud_trees;
 }
