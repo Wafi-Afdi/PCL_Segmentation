@@ -344,7 +344,7 @@ inline CylinderParams fitCylinderZAxis(
   result.dir_y = 0.0f;
   result.dir_z = 1.0f;
 
-  result.height = object_det.dimensions_3d[2];
+  result.height = object_det.dimensions_3d[3];
   
   float width = (getCorner(3) - getCorner(0)).norm();
   float depth = (getCorner(1) - getCorner(0)).norm();
