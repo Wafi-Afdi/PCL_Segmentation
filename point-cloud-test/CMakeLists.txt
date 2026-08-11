@@ -126,6 +126,7 @@ install(TARGETS
   pcl_proc
   zed_pcl_proc_node
   pcl_norm_vis
+  bb_pcl_proc_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
