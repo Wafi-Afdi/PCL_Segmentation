@@ -38,7 +38,7 @@ target_include_directories(pcl_proc PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 target_link_libraries(pcl_proc ${PCL_LIBRARIES} ${VTK_LIBRARIES})
-ament_target_dependencies(pcl_proc rclcpp pcl_cstm_msg)
+ament_target_dependencies(pcl_proc rclcpp pcl_cstm_msg zed_msgs)
 
 if (VTK_VERSION VERSION_GREATER_EQUAL "8.90.0")
   vtk_module_autoinit(

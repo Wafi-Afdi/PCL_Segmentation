@@ -163,173 +163,7 @@ namespace point_cloud_test
         return;
       }
 
-      // Reduce ke 700k jika lebih dari 1,2 juta point cloud
-
-      int total_point_clouds = 0;
-      int processed_count = 0;
-      for (const auto &pair : *to_process)
-      {
-        if (processed_count >= 7)
-        {
-          break; // Stop the loop after 7 pairs
-        }
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::fromROSMsg(*pair.cloud, *cloud);
-        total_point_clouds += (cloud->width * cloud->height);
-        processed_count++;
-      }
-
-      pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(
-          new pcl::PointCloud<pcl::PointXYZ>);
-
-      auto time_filter_start = std::chrono::high_resolution_clock::now();
-
-      processed_count = 0;
-      for (auto it = to_process->rbegin(); it != to_process->rend(); ++it)
-      {
-        if (processed_count >= 8)
-        {
-          break; 
-        }
-        const auto &pair = *it;
-
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_raw(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_NoNaN(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::fromROSMsg(*pair.cloud, *cloud_raw);
-        std::vector<int> mapping_indices; // Menyimpan indeks poin yang valid
-        pcl::removeNaNFromPointCloud(*cloud_raw, *cloud_NoNaN, mapping_indices);
-        
-        pcl::CropBox<pcl::PointXYZ> crop_box;
-        crop_box.setInputCloud(cloud_NoNaN);
-
-        Eigen::Vector4f min_pt(-10.0f, -10.0f, -5.0f, 1.0f); 
-        crop_box.setMin(min_pt);
-        Eigen::Vector4f max_pt(10.0f, 10.0f, 5.0f, 1.0f);
-        crop_box.setMax(max_pt);
-
-        crop_box.filter(*cloud_filtered);
-
-        pcl::RandomSample<pcl::PointXYZ> random_sampler;
-
-        if (total_point_clouds > max_pcl_points)
-        {
-          // RCLCPP_INFO(get_logger(), "Resampling");
-          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_sampled(new pcl::PointCloud<pcl::PointXYZ>);
-          unsigned int samples_per_pair = (max_pcl_points / to_process->size());
-          random_sampler.setInputCloud(cloud_filtered);
-          random_sampler.setSample(samples_per_pair);
-
-          random_sampler.filter(*cloud_sampled);
-          cloud_filtered = cloud_sampled;
-        }
-
-
-
-        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::VoxelGrid<pcl::PointXYZ> voxel;
-        voxel.setInputCloud(cloud_filtered);
-        voxel.setLeafSize(voxel_size, voxel_size, voxel_size);
-        voxel.filter(*filtered);
-
-        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-        sor.setInputCloud(filtered);
-        sor.setMeanK(50);            // Default often used is 50
-        sor.setStddevMulThresh(1.0); // Default often used is 1.0
-        sor.filter(*filtered);
-
-        const auto &pos = pair.pose->pose.position;
-        const auto &q = pair.pose->pose.orientation;
-        Eigen::Quaternionf rotation(q.w, q.x, q.y, q.z);
-        Eigen::Matrix3f R = rotation.toRotationMatrix();
-        Eigen::Vector3f t(pos.x, pos.y, pos.z);
-
-        for (const auto &pt : filtered->points)
-        {
-          if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
-          {
-            continue;
-          }
-
-          Eigen::Vector3f robot_pt(pt.x, pt.y, pt.z);
-
-          if (robot_pt.norm() > 20.0f)
-          {
-            continue;
-          }
-          Eigen::Vector3f global_pt = R * robot_pt + t;
-          pcl::PointXYZ p;
-          p.x = global_pt.x();
-          p.y = global_pt.y();
-          p.z = global_pt.z();
-          merged_cloud->push_back(p);
-        }
-        processed_count++;
-      }
-
-      auto time_filter_end = std::chrono::high_resolution_clock::now();
-      double time_filter_ms =
-          std::chrono::duration_cast<std::chrono::microseconds>(time_filter_end - time_filter_start)
-              .count() /
-          1000.0;
-      RCLCPP_INFO(get_logger(), "Total Time Filter: %lf ms, array size: %ld", time_filter_ms, to_process->size());
-
-      merged_cloud->width = merged_cloud->size();
-      merged_cloud->height = 1;
-      merged_cloud->is_dense = true;
-
-      auto time_ransac_start = std::chrono::high_resolution_clock::now();
-      std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> non_ground;
-      if (ground_removal_method == PMF) {
-        non_ground = processPMF(merged_cloud);
-      } else {
-        non_ground = processRANSAC(merged_cloud);
-      }
-      if (!non_ground || non_ground->empty())
-      {
-        RCLCPP_WARN(get_logger(), "Ground removal failed");
-        to_process->clear();
-        return;
-      }
-      auto time_ransac_end = std::chrono::high_resolution_clock::now();
-      double time_ransac_ms =
-          std::chrono::duration_cast<std::chrono::microseconds>(time_ransac_end - time_ransac_start)
-              .count() /
-          1000.0;
-      RCLCPP_INFO(get_logger(), "Total Time Ground Removal: %lf ms", time_ransac_ms);
-
-      auto trunk_filter = removeNonNormals(non_ground);
-      pcl::PointCloud<pcl::PointXYZ>::Ptr bb_filter;
-      {
-        std::lock_guard<std::mutex> lock(obj_det_mutex_);
-        bb_filter = cropBoundingBox(trunk_filter, latest_object_det_);
-      }
-
-      sensor_msgs::msg::PointCloud2 output_msg;
-      pcl::toROSMsg(*bb_filter, output_msg);
-      output_msg.header.stamp = now();
-      output_msg.header.frame_id = "plantation";
-
-      cloud_pub_->publish(output_msg);
-
-      auto time_cluster_start = std::chrono::high_resolution_clock::now();
-      std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
-      if (clustering_method == RegionGrowing) {
-        clusters = clusterTrees_RegionGrowing(bb_filter, regionGrowing_max_degrees, regionGrowing_curvature_threshold);
-      } else if (clustering_method == EuclideanClustering) {
-        clusters = clusterTrees(bb_filter, euclidean_max_z_mean, euclidean_max_z_variance);
-      } else {
-        clusters = clusterTrees(bb_filter);
-      }
-      auto time_cluster_end = std::chrono::high_resolution_clock::now();
-
-      double time_cluster_ms =
-          std::chrono::duration_cast<std::chrono::microseconds>(time_cluster_end - time_cluster_start)
-              .count() /
-          1000.0;
-      RCLCPP_INFO(get_logger(), "Total Time Cluster: %lf ms, total_clusters: %ld", time_cluster_ms, clusters.size());
-
-      if (!clusters.empty())
+      if (!latest_object_det_->objects.empty())
       {
         pcl_cstm_msg::msg::PointCloudArray cluster_msg;
         cluster_msg.header.stamp = now();
@@ -340,20 +174,15 @@ namespace point_cloud_test
         cyl_array_msg.header.frame_id = "plantation";
 
         std::vector<CylinderParams> params_vec;
-        params_vec.reserve(clusters.size());
+        params_vec.reserve(latest_object_det_->objects.size());
 
         int is_valid = 0;
         int is_point = 0;
         auto time_fit_start = std::chrono::high_resolution_clock::now();
-        for (const auto &cluster : clusters)
+        for (const auto &obj : latest_object_det_->objects)
         {
-          sensor_msgs::msg::PointCloud2 cluster_cloud;
-          pcl::toROSMsg(*cluster, cluster_cloud);
-          cluster_cloud.header.stamp = now();
-          cluster_cloud.header.frame_id = "plantation";
-          cluster_msg.clouds.push_back(std::move(cluster_cloud));
 
-          auto params = fitCylinderZAxis(cluster);
+          auto params = fitCylinderZAxis(obj);
           params_vec.push_back(params);
 
           pcl_cstm_msg::msg::CylinderFit cyl_msg;
@@ -388,14 +217,6 @@ namespace point_cloud_test
           {
             is_valid++;
           }
-          if (params.clouds && !params.clouds->points.empty())
-          {
-            // Convert the point cloud
-            is_point++;
-            pcl::toROSMsg(*params.clouds, cyl_msg.clouds);
-
-            cyl_msg.clouds.header = cyl_msg.header;
-          }
 
           cyl_array_msg.cylinders.push_back(std::move(cyl_msg));
         }
@@ -405,7 +226,7 @@ namespace point_cloud_test
             std::chrono::duration_cast<std::chrono::microseconds>(time_fit_end - time_fit_start)
                 .count() /
             1000.0;
-        RCLCPP_INFO(get_logger(), "Total Fit: %lf ms, valid: %d %d", time_fit_ms, is_valid, is_point);
+        RCLCPP_INFO(get_logger(), "Total Fit: %lf ms, valid: %d", time_fit_ms, is_valid);
 
         cluster_pub_->publish(cluster_msg);
         if (!cyl_array_msg.cylinders.empty())
@@ -473,7 +294,6 @@ namespace point_cloud_test
           std::chrono::duration_cast<std::chrono::microseconds>(timer_cb_end - timer_cb_start)
               .count() /
           1000.0;
-      RCLCPP_INFO(get_logger(), "Total Point Processed: %d", total_point_clouds);
       RCLCPP_INFO(get_logger(), "Total Times: %lf ms", timer_cb_ms);
     }
 

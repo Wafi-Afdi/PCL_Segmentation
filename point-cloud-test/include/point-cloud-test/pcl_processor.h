@@ -27,6 +27,8 @@
 #include "pcl_cstm_msg/msg/v_normals.hpp"
 #include "pcl_cstm_msg/msg/xyz.hpp"
 
+#include "zed_msgs/msg/object.hpp"
+
 enum ClusteringMethod {
     RegionGrowing,   // 0
     EuclideanClustering, // 1
@@ -317,6 +319,43 @@ struct CylinderParams
   pcl::PointCloud<pcl::PointXYZ>::Ptr clouds;
   bool isValid = false;
 };
+
+inline CylinderParams fitCylinderZAxis(
+    const zed_msgs::msg::Object &object_det)
+{
+  CylinderParams result;
+
+  auto getCorner = [&](int idx) {
+      return Eigen::Vector3f(
+          object_det.bounding_box_3d.corners[idx].kp[0],
+          object_det.bounding_box_3d.corners[idx].kp[1],
+          object_det.bounding_box_3d.corners[idx].kp[2]
+      );
+  };
+
+  result.center_x = object_det.position[0];
+  result.center_y = object_det.position[1];
+  result.center_z = object_det.position[2];
+
+  result.dir_x = 0.0f;
+  result.dir_y = 0.0f;
+  result.dir_z = 1.0f;
+
+  result.height = object_det.dimensions_3d[2];
+  
+  float width = (getCorner(3) - getCorner(0)).norm();
+  float depth = (getCorner(1) - getCorner(0)).norm();
+  float average_diameter = (width + depth) / 2.0f;
+  result.radius = average_diameter / 2.0f;
+
+  result.confidence = object_det.confidence; 
+
+  // 5. Ignore Point Clouds as requested
+  result.clouds = nullptr; 
+  result.isValid = true;
+
+  return result;
+}
 
 inline CylinderParams fitCylinderZAxis(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &cluster)
