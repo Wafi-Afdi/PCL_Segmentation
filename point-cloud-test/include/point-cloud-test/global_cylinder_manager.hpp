@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include "point-cloud-test/pcl_processor.h"
+#include "point-cloud-test/custom_types.h"
 
 namespace point_cloud_test
 {

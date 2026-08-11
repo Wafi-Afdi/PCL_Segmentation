@@ -25,19 +25,22 @@
 #include "pcl_cstm_msg/msg/point_cloud_array.hpp"
 #include "pcl_cstm_msg/msg/v_cylinders_fit.hpp"
 #include "pcl_cstm_msg/msg/tracked_cylinder_array.hpp"
-#include "point-cloud-test/custom_types.h"
 #include "point-cloud-test/pcl_processor.h"
 #include "point-cloud-test/pcl_filter.h"
 #include "point-cloud-test/global_cylinder_manager.hpp"
+#include "point-cloud-test/custom_types.h"
+
+#include "zed_msgs/msg/objects_stamped.hpp"
 
 namespace point_cloud_test
 {
 
-  class PclProcNode : public rclcpp::Node
+
+  class BB_PCL_Proc_Node : public rclcpp::Node
   {
   public:
-    PclProcNode()
-        : Node("zed_pcl_proc_node")
+    BB_PCL_Proc_Node()
+        : Node("bb_pcl_proc_node")
     {
       int clustering_method_params = 1;
       int ground_removal_method_params = 1;
@@ -85,17 +88,20 @@ namespace point_cloud_test
 
       cloud_sub_.subscribe(this, "/input_cloud",
                             rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
+      sub_object_det_ = this->create_subscription<zed_msgs::msg::ObjectsStamped>(
+      "/zed/zed_node/obj_det/objects", 10, std::bind(&BB_PCL_Proc_Node::callback_obj_det, this, std::placeholders::_1));
+
 
       if (is_use_odom_pcl_pair) {
         odom_sub_.subscribe(this, "/odom", rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
         sync_PCL_Odometry_ = std::make_shared<SynchronizerPCLAndOdometry>(
             SyncPolicyPCLAndOdometry(10), cloud_sub_, odom_sub_);
-        sync_PCL_Odometry_->registerCallback(&PclProcNode::sync_callback_odom_pcl, this);
+        sync_PCL_Odometry_->registerCallback(&BB_PCL_Proc_Node::sync_callback_odom_pcl, this);
       } else {
         pose_sub_.subscribe(this, "/pose", rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
         sync_PCL_PoseStamped_ = std::make_shared<SynchronizerPCLAndPoseStamped>(
             SyncPolicyPCLAndPoseStamped(10), cloud_sub_, pose_sub_);
-        sync_PCL_PoseStamped_->registerCallback(&PclProcNode::sync_callback_pose_pcl, this);
+        sync_PCL_PoseStamped_->registerCallback(&BB_PCL_Proc_Node::sync_callback_pose_pcl, this);
       }
       
 
@@ -118,6 +124,10 @@ namespace point_cloud_test
     }
 
   private:
+    void callback_obj_det(const zed_msgs::msg::ObjectsStamped::ConstSharedPtr &obj_det_msg) {
+      std::lock_guard<std::mutex> lock(obj_det_mutex_);
+      latest_object_det_ = std::make_shared<zed_msgs::msg::ObjectsStamped>(*obj_det_msg);
+    }
 
     void sync_callback_pose_pcl(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
@@ -289,9 +299,14 @@ namespace point_cloud_test
       RCLCPP_INFO(get_logger(), "Total Time Ground Removal: %lf ms", time_ransac_ms);
 
       auto trunk_filter = removeNonNormals(non_ground);
+      pcl::PointCloud<pcl::PointXYZ>::Ptr bb_filter;
+      {
+        std::lock_guard<std::mutex> lock(obj_det_mutex_);
+        bb_filter = cropBoundingBox(trunk_filter, latest_object_det_);
+      }
 
       sensor_msgs::msg::PointCloud2 output_msg;
-      pcl::toROSMsg(*trunk_filter, output_msg);
+      pcl::toROSMsg(*bb_filter, output_msg);
       output_msg.header.stamp = now();
       output_msg.header.frame_id = "plantation";
 
@@ -300,11 +315,11 @@ namespace point_cloud_test
       auto time_cluster_start = std::chrono::high_resolution_clock::now();
       std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
       if (clustering_method == RegionGrowing) {
-        clusters = clusterTrees_RegionGrowing(trunk_filter, regionGrowing_max_degrees, regionGrowing_curvature_threshold);
+        clusters = clusterTrees_RegionGrowing(bb_filter, regionGrowing_max_degrees, regionGrowing_curvature_threshold);
       } else if (clustering_method == EuclideanClustering) {
-        clusters = clusterTrees(trunk_filter, euclidean_max_z_mean, euclidean_max_z_variance);
+        clusters = clusterTrees(bb_filter, euclidean_max_z_mean, euclidean_max_z_variance);
       } else {
-        clusters = clusterTrees(trunk_filter);
+        clusters = clusterTrees(bb_filter);
       }
       auto time_cluster_end = std::chrono::high_resolution_clock::now();
 
@@ -483,6 +498,10 @@ namespace point_cloud_test
     rclcpp::Publisher<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinder_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
+    std::mutex obj_det_mutex_;
+    rclcpp::Subscription<zed_msgs::msg::ObjectsStamped>::SharedPtr sub_object_det_;
+    zed_msgs::msg::ObjectsStamped::SharedPtr latest_object_det_; 
+
     std::shared_ptr<std::vector<CloudPosePair>> write_buffer_{
         std::make_shared<std::vector<CloudPosePair>>()};
     std::shared_ptr<std::vector<CloudPosePair>> process_buffer_{
@@ -513,7 +532,7 @@ int main(int argc, char **argv)
   pcl::console::setVerbosityLevel(pcl::console::L_ALWAYS);
 
   rclcpp::executors::MultiThreadedExecutor executor;
-  auto node = std::make_shared<point_cloud_test::PclProcNode>();
+  auto node = std::make_shared<point_cloud_test::BB_PCL_Proc_Node>();
   executor.add_node(node);
   executor.spin();
 
