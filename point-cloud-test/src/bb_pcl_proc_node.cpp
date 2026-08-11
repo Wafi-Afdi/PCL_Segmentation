@@ -216,6 +216,7 @@ namespace point_cloud_test
           if (params.isValid)
           {
             is_valid++;
+            RCLCPP_INFO(get_logger(), "Cylinder Tracked: height %lf radius %lf, valid: %d", cyl_msg.height, cyl_msg.radius, is_valid);
           }
 
           cyl_array_msg.cylinders.push_back(std::move(cyl_msg));
