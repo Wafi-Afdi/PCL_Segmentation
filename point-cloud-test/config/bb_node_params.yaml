@@ -4,6 +4,7 @@ bb_pcl_proc_node:
     voxel_size: 0.3
     max_pcl_points: 500000
     callback_time: 500
+    object_label_target: "pohon"
     clustering_params:
       method: 1 # 0 is RegionGrowing, 1 is EuclideanCluster
       euclidean_clustering:

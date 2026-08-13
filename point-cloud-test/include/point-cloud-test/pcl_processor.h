@@ -344,7 +344,7 @@ inline CylinderParams fitCylinderZAxis(
   result.dir_y = 0.0f;
   result.dir_z = 1.0f;
 
-  result.height = object_det.dimensions_3d[3];
+  result.height = (getCorner(0) - getCorner(4)).norm();
   
   float width = (getCorner(3) - getCorner(0)).norm();
   float depth = (getCorner(1) - getCorner(0)).norm();
@@ -398,27 +398,21 @@ inline CylinderParams fitCylinderZAxis(
       object_det.position[2]
   );
   
-  // Math: P_global = (Rotation * P_local) + Translation
   Eigen::Vector3f global_center = q_global * local_center + t_global;
 
   result.center_x = global_center.x();
   result.center_y = global_center.y();
   result.center_z = global_center.z();
 
-  // 3. Transform the Local Direction (Tilt) to Global Direction
-  // Assuming the object stands straight up (Z-axis) in the *local* camera frame,
-  // we must rotate this vector to see how it points in the global frame.
   Eigen::Vector3f local_dir(0.0f, 0.0f, 1.0f);
   
-  // Math: D_global = Rotation * D_local (Direction vectors are not translated, only rotated)
   Eigen::Vector3f global_dir = q_global * local_dir;
   
   result.dir_x = global_dir.x();
   result.dir_y = global_dir.y();
   result.dir_z = global_dir.z();
 
-  // 4. Dimensions (Size remains the same regardless of coordinate frame)
-  result.height = object_det.dimensions_3d[2];
+  result.height = (getCorner(0) - getCorner(4)).norm();
   
   float width = (getCorner(3) - getCorner(0)).norm();
   float depth = (getCorner(1) - getCorner(0)).norm();
@@ -427,7 +421,6 @@ inline CylinderParams fitCylinderZAxis(
 
   result.confidence = object_det.confidence; 
 
-  // 5. Ignore Point Clouds as requested
   result.clouds = nullptr; 
   result.isValid = true;
 
