@@ -1,6 +1,7 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <algorithm>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -49,7 +50,10 @@ namespace point_cloud_test
       this->declare_parameter<float>("voxel_size", 0.3);
       this->declare_parameter<int>("max_pcl_points", 450000);
       this->declare_parameter<int>("callback_time", 500);
-      this->declare_parameter<std::string>("object_label_target", "pohon");
+      this->declare_parameter<std::vector<std::string>>(
+        "object_label_target", 
+        {"pohon", "bunga"}
+      );
 
       // ground removal
       this->declare_parameter<int>("ground_removal.method", 1);
@@ -81,7 +85,8 @@ namespace point_cloud_test
       this->get_parameter("voxel_size", voxel_size);
       this->get_parameter("max_pcl_points", max_pcl_points);
       this->get_parameter("callback_time", callback_time);
-      this->get_parameter("object_label_target", object_label_target);
+
+      object_label_target = this->get_parameter("object_label_target").as_string_array();
 
       rclcpp::SubscriptionOptions sub_opts;
       rclcpp::CallbackGroup::SharedPtr sync_cb_group = create_callback_group(
@@ -183,7 +188,7 @@ namespace point_cloud_test
         auto time_fit_start = std::chrono::high_resolution_clock::now();
         for (const auto &obj : latest_object_det_->objects)
         {
-          if (obj.label != object_label_target) {
+          if (std::find(object_label_target.begin(), object_label_target.end(), obj.label) == object_label_target.end()) {
             continue;
           }
           auto params = fitCylinderZAxis(obj, *to_process->back().pose);
@@ -347,7 +352,7 @@ namespace point_cloud_test
     float regionGrowing_max_degrees = 3.0;
     float regionGrowing_curvature_threshold = 1.0;
 
-    std::string object_label_target = "pohon";
+    std::vector<std::string> object_label_target = {"pohon", "bunga"};
   };
 
 } // namespace point_cloud_test
