@@ -31,6 +31,7 @@ struct TrackedCylinder
   
   int32_t seen_count = 0;
   int32_t missed_count = 0;
+  std::string type = "default";
 
   // We still use 2D XY distance for matching because tree canopies 
   // fluctuate in height, but ground positions remain stable.
@@ -90,7 +91,7 @@ public:
         }
 
         float d2 = tracks_[i].sq_xy_dist(det.center_x, det.center_y);
-        if (d2 < best_dist) {
+        if (d2 < best_dist && det.type == tracks_[i].type) {
           best_dist = d2;
           best_idx = static_cast<int>(i);
         }
@@ -139,6 +140,7 @@ public:
         new_track.confidence = det.confidence;
         new_track.seen_count = 1;
         new_track.missed_count = 0;
+        new_track.type = det.type;
         
         tracks_.push_back(new_track);
       }

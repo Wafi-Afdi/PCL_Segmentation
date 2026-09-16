@@ -192,6 +192,7 @@ namespace point_cloud_test
             continue;
           }
           auto params = fitCylinderZAxis(obj, *to_process->back().pose);
+          params.type = obj.label;
           params_vec.push_back(params);
 
           pcl_cstm_msg::msg::CylinderFit cyl_msg;
@@ -274,6 +275,7 @@ namespace point_cloud_test
           tc_msg.cylinder.pose.position.x = t.center_x;
           tc_msg.cylinder.pose.position.y = t.center_y;
           tc_msg.cylinder.pose.position.z = t.center_z;
+          tc_msg.type = t.type;
 
           Eigen::Vector3f z_axis(0.0f, 0.0f, 1.0f);
           Eigen::Vector3f cylinder_axis(t.dir_x, t.dir_y, t.dir_z);

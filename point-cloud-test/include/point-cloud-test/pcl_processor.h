@@ -320,6 +320,7 @@ struct CylinderParams
   float confidence = 0.0f;
   pcl::PointCloud<pcl::PointXYZ>::Ptr clouds;
   bool isValid = false;
+  std::string type = "default";
 };
 
 inline CylinderParams fitCylinderZAxis(
