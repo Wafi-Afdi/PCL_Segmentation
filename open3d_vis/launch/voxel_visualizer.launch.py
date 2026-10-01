@@ -21,6 +21,9 @@ def generate_launch_description():
     input_tracked_cylinders = DeclareLaunchArgument(
         'input_tracked_cylinders_topic', default_value='/global_cylinders',
         description='Global tracked cylinders topic')
+    input_ellipsoids = DeclareLaunchArgument(
+        'input_ellipsoids_topic', default_value='/ellipsoids',
+        description='Tracked Obstalce in Ellipsoid')
     yaml_params_file = DeclareLaunchArgument(
             'yaml_params_file',default_value=[
             PathJoinSubstitution([
@@ -38,6 +41,7 @@ def generate_launch_description():
         input_cylinders,
         input_odom,
         input_tracked_cylinders,
+        input_ellipsoids,
         yaml_params_file,
         Node(
             package='open3d_vis',
@@ -53,6 +57,8 @@ def generate_launch_description():
                 ('/cylinders', LaunchConfiguration('input_cylinders_topic')),
                 ('/odom', LaunchConfiguration('input_odom_topic')),
                 ('/global_cylinders', LaunchConfiguration('input_tracked_cylinders_topic')),
+                ('/ellipsoids', LaunchConfiguration('input_ellipsoids_topic')),
+                
             ],
         ),
     ])

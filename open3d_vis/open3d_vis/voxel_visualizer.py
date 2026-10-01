@@ -12,7 +12,7 @@ from sensor_msgs.msg import PointCloud2
 from nav_msgs.msg import Odometry
 from sensor_msgs_py import point_cloud2
 
-from pcl_cstm_msg.msg import PointCloudArray, TrackedCylinderArray, VCylindersFit, TrackedCylinderArray, VNormals
+from pcl_cstm_msg.msg import PointCloudArray, TrackedCylinderArray, VCylindersFit, TrackedCylinderArray, VNormals, AxisAlignedElipsoidArray
 
 
 CLUSTER_COLORS = [
@@ -43,6 +43,40 @@ def _make_cylinder_wireframe(center_x, center_y, center_z, radius, height, color
     lines.paint_uniform_color(color)
     return lines
 
+def _make_ellipsoid_wireframe(
+        center_x,
+        center_y,
+        center_z,
+        radius_x,
+        radius_y,
+        radius_z,
+        color):
+
+    # Create unit sphere
+    mesh = o3d.geometry.TriangleMesh.create_sphere(
+        radius=1.0,
+        resolution=12
+    )
+
+    # Non-uniformly scale sphere vertices into an ellipsoid.
+    vertices = np.asarray(mesh.vertices)
+
+    vertices[:, 0] *= radius_x
+    vertices[:, 1] *= radius_y
+    vertices[:, 2] *= radius_z
+
+    # Move ellipsoid into world coordinates
+    vertices[:, 0] += center_x
+    vertices[:, 1] += center_y
+    vertices[:, 2] += center_z
+
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+
+    # Convert surface mesh to wireframe
+    lines = o3d.geometry.LineSet.create_from_triangle_mesh(mesh)
+    lines.paint_uniform_color(color)
+
+    return lines
 
 def _make_drone_arrow(position, orientation_q):
     qw, qx, qy, qz = orientation_q
@@ -86,6 +120,9 @@ class VoxelVisualizer(Node):
 
         self.declare_parameter('show_tracked', True)
         self.is_show_tracked = self.get_parameter('show_tracked').get_parameter_value().bool_value
+        
+        self.declare_parameter('show_ellipsoids', True)
+        self.is_show_ellipsoids = (self.get_parameter('show_ellipsoids').get_parameter_value().bool_value)
 
         self._lock = threading.Lock()
         
@@ -96,6 +133,7 @@ class VoxelVisualizer(Node):
         self._latest_clusters = None
         self._latest_cylinders = None
         self._latest_tracked_cylinders = None
+        self._latest_ellipsoids = None
         self._latest_normals = None
         self._latest_origins = None
         self._latest_odom = None
@@ -106,6 +144,7 @@ class VoxelVisualizer(Node):
         self._current_cluster_geoms = []
         self._current_cylinder_geoms = []
         self._current_tracked_geoms = []
+        self._current_ellipsoid_geoms = []
         self._current_normal_geom = None
         self._drone_arrow = None
 
@@ -166,6 +205,13 @@ class VoxelVisualizer(Node):
             '/normals',
             self._normals_callback,
             qos_profile_sensor_data)
+        
+        self._sub_ellipsoids = self.create_subscription(
+            AxisAlignedElipsoidArray,
+            '/ellipsoids',
+            self._ellipsoids_callback,
+            qos_profile_sensor_data
+        )
 
         # --- TERMINAL INPUT LISTENER THREAD ---
         self._input_thread = threading.Thread(target=self._wait_for_terminal_enter, daemon=True)
@@ -363,7 +409,55 @@ class VoxelVisualizer(Node):
             with self._lock:
                 self._latest_cylinders = wireframes 
                 # self._latest_clusters = clusters_voxel
+                
+    def _ellipsoids_callback(self, msg: AxisAlignedElipsoidArray):
+        if not self.is_show_ellipsoids:
+            return
+        if self.is_paused:
+            return
 
+        wireframes = []
+
+        for i, ellipsoid in enumerate(msg.elipsoids):
+            # Protect Open3D against zero/invalid radii
+            rx = float(ellipsoid.radii.x)
+            ry = float(ellipsoid.radii.y)
+            rz = float(ellipsoid.radii.z)
+            
+            if (
+                not np.isfinite(rx) or
+                not np.isfinite(ry) or
+                not np.isfinite(rz)
+            ):
+                continue
+
+            if rx <= 0.0 or ry <= 0.0 or rz <= 0.0:
+                continue
+
+            color = CLUSTER_COLORS[i % len(CLUSTER_COLORS)]
+
+            wireframe = _make_ellipsoid_wireframe(
+                center_x=ellipsoid.center.x,
+                center_y=ellipsoid.center.y,
+                center_z=ellipsoid.center.z,
+                radius_x=rx,
+                radius_y=ry,
+                radius_z=rz,
+                color=color
+            )
+
+            wireframes.append(wireframe)
+
+        self.get_logger().info(
+            f'Received {len(msg.elipsoids)} ellipsoids',
+            throttle_duration_sec=2.0
+        )
+
+        # Important:
+        # Store [] too, so an empty incoming array clears old ellipsoids.
+        with self._lock:
+            self._latest_ellipsoids = wireframes
+            
     def _tracked_cylinders_callback(self, msg: TrackedCylinderArray):
         if self.is_show_tracked is False:
             return
@@ -405,6 +499,7 @@ class VoxelVisualizer(Node):
         odom = None
         normals = None
         origins = None
+        ellipsoids = None
         with self._lock:
             cloud = self._latest_cloud
             self._latest_cloud = None
@@ -417,6 +512,9 @@ class VoxelVisualizer(Node):
             
             tracked_cylinders = self._latest_tracked_cylinders
             self._latest_tracked_cylinders = None
+            
+            ellipsoids = self._latest_ellipsoids
+            self._latest_ellipsoids = None
             
             normals = self._latest_normals
             origins = self._latest_origins
@@ -439,6 +537,9 @@ class VoxelVisualizer(Node):
             
         if normals is not None and origins is not None:
             self._update_normals(normals, origins)
+        
+        if ellipsoids is not None:
+            self._update_ellipsoids(ellipsoids)
             
         if odom is not None:
             self._render_drone(odom)
@@ -454,6 +555,23 @@ class VoxelVisualizer(Node):
         
         self._current_cloud_geom = voxel
         self._vis.add_geometry(self._current_cloud_geom, reset_bounding_box=self._first_frame)
+        self._first_frame = False
+        
+    def _update_ellipsoids(self, ellipsoid_wireframes):
+
+        # Remove previous ellipsoids
+        for geom in self._current_ellipsoid_geoms:
+            self._vis.remove_geometry(
+                geom,
+                reset_bounding_box=False
+            )
+        self._current_ellipsoid_geoms = ellipsoid_wireframes
+
+        for geom in self._current_ellipsoid_geoms:
+            self._vis.add_geometry(
+                geom,
+                reset_bounding_box=self._first_frame
+            )
         self._first_frame = False
 
     def _update_clusters(self, cluster_voxels):

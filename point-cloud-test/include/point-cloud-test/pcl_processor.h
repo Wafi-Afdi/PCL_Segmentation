@@ -29,6 +29,7 @@
 
 #include "zed_msgs/msg/object.hpp"
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include "pcl_cstm_msg/msg/axis_aligned_elipsoid.hpp"
 
 
 enum ClusteringMethod {
@@ -115,7 +116,7 @@ inline pcl::PointCloud<pcl::PointXYZ>::Ptr processRANSAC(
   seg.setOptimizeCoefficients(true);
   seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
   seg.setMethodType(pcl::SAC_RANSAC);
-  seg.setMaxIterations(1000);
+  seg.setMaxIterations(5000);
 
   seg.setAxis(Eigen::Vector3f::UnitZ());
   seg.setEpsAngle(0.17f);
@@ -608,5 +609,176 @@ inline std::shared_ptr<pcl_cstm_msg::msg::VNormals> get_normals(
 
   return normals_msg;
 }
+
+inline void splitClusterByTargetSize(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+    const std::vector<int> &indices,
+    int target_cluster_size,
+    int split_threshold,
+    std::vector<std::vector<int>> &output)
+{
+  // Small cluster keep
+  if (indices.size() <= static_cast<size_t>(split_threshold))
+  {
+    output.push_back(indices);
+    return;
+  }
+
+  Eigen::Vector4f min_pt, max_pt;
+  pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
+
+  const float size_x = max_pt.x() - min_pt.x();
+  const float size_y = max_pt.y() - min_pt.y();
+  const float size_z = max_pt.z() - min_pt.z();
+
+  // Split on the bigget axis
+  int axis = 0;
+
+  if (size_y > size_x)
+    axis = 1;
+
+  if (size_z > (axis == 0 ? size_x : size_y))
+    axis = 2;
+
+  std::vector<int> sorted_indices = indices;
+
+  std::sort(
+      sorted_indices.begin(),
+      sorted_indices.end(),
+      [&](int a, int b)
+      {
+        const auto &pa = cloud->points[a];
+        const auto &pb = cloud->points[b];
+
+        if (axis == 0)
+          return pa.x < pb.x;
+
+        if (axis == 1)
+          return pa.y < pb.y;
+
+        return pa.z < pb.z;
+      });
+
+  // Decide how many pieces we approximately want
+  const size_t cluster_size = sorted_indices.size();
+
+  size_t number_of_parts =
+      static_cast<size_t>(
+          std::ceil(
+              static_cast<double>(cluster_size) /
+              static_cast<double>(target_cluster_size)));
+
+  number_of_parts = std::max<size_t>(2, number_of_parts);
+
+  // Divide the sorted cluster into approximately equal-sized pieces
+  const size_t base_size = cluster_size / number_of_parts;
+  const size_t remainder = cluster_size % number_of_parts;
+
+  size_t begin = 0;
+
+  for (size_t i = 0; i < number_of_parts; ++i)
+  {
+    size_t part_size =
+        base_size + (i < remainder ? 1 : 0);
+
+    size_t end = begin + part_size;
+
+    std::vector<int> subcluster(
+        sorted_indices.begin() + begin,
+        sorted_indices.begin() + end);
+
+    /*
+      Check cluster that is still too big
+     */
+    if (subcluster.size() > static_cast<size_t>(split_threshold))
+    {
+      splitClusterByTargetSize(
+          cloud,
+          subcluster,
+          target_cluster_size,
+          split_threshold,
+          output);
+    }
+    else
+    {
+      output.push_back(std::move(subcluster));
+    }
+
+    begin = end;
+  }
+}
+
+inline std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> fitAxisAlignedEllipsoids(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
+    int min_points = 5,
+    int target_cluster_size = 80,
+    int split_threshold = 120,
+    float cluster_tolerance = 0.5f,
+    float radii_scale = 1.7320508f)
+{
+  std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> ellipsoids;
+
+  if (!cloud || cloud->points.empty())
+  {
+    return ellipsoids;
+  }
+
+  // 1. Setup KdTree search method for clustering
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
+      new pcl::search::KdTree<pcl::PointXYZ>());
+  tree->setInputCloud(cloud);
+ 
+  // 2. Perform Euclidean Cluster Extraction
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+  ec.setClusterTolerance(cluster_tolerance);
+  ec.setMinClusterSize(min_points);
+  ec.setMaxClusterSize(
+    static_cast<int>(cloud->size())
+  );
+  ec.setSearchMethod(tree);
+  ec.setInputCloud(cloud);
+  ec.extract(cluster_indices);
+
+  std::vector<std::vector<int>> final_clusters;
+
+  // split clustes into smaller clusters
+  for (const auto &cluster : cluster_indices)
+  {
+    splitClusterByTargetSize(
+        cloud,
+        cluster.indices,
+        target_cluster_size,
+        split_threshold,
+        final_clusters
+    );
+  }
+ 
+  // 3. Fit an Axis-Aligned Ellipsoid for final cluster
+  for (const auto &indices : final_clusters)
+  {
+    Eigen::Vector4f min_pt, max_pt;
+    pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
+ 
+    pcl_cstm_msg::msg::AxisAlignedElipsoid ellipsoid_msg;
+ 
+    // Center of the axis-aligned ellipsoid
+    ellipsoid_msg.center.x = static_cast<double>((min_pt.x() + max_pt.x()) / 2.0f);
+    ellipsoid_msg.center.y = static_cast<double>((min_pt.y() + max_pt.y()) / 2.0f);
+    ellipsoid_msg.center.z = static_cast<double>((min_pt.z() + max_pt.z()) / 2.0f);
+ 
+    // Semi-axes radii (a, b, c along X, Y, Z)
+    // CHANGED: each half-extent is multiplied by radii_scale (default sqrt(3)) so the
+    // ellipsoid fully encloses the axis-aligned bounding box instead of sitting inside it.
+    ellipsoid_msg.radii.x = static_cast<double>(radii_scale * (max_pt.x() - min_pt.x()) / 2.0f);
+    ellipsoid_msg.radii.y = static_cast<double>(radii_scale * (max_pt.y() - min_pt.y()) / 2.0f);
+    ellipsoid_msg.radii.z = static_cast<double>(radii_scale * (max_pt.z() - min_pt.z()) / 2.0f);
+ 
+    ellipsoids.push_back(ellipsoid_msg);
+  }
+ 
+  return ellipsoids;
+}
+
 
 #endif // POINT_CLOUD_TEST__PCL_PROCESSOR_H_

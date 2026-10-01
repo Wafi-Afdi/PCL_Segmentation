@@ -122,11 +122,31 @@ ament_target_dependencies(bb_pcl_proc_node
   zed_msgs
 )
 
+# obstacle detection node 
+add_executable(obs_det_pcl_proc_node src/pcl_obstacle_det.cpp)
+
+target_include_directories(obs_det_pcl_proc_node PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(obs_det_pcl_proc_node ${PCL_LIBRARIES} ${VTK_LIBRARIES})
+ament_target_dependencies(obs_det_pcl_proc_node
+  rclcpp
+  std_msgs
+  geometry_msgs
+  nav_msgs
+  sensor_msgs
+  pcl_conversions
+  message_filters
+  pcl_cstm_msg
+  zed_msgs
+)
+
 install(TARGETS
   pcl_proc
   zed_pcl_proc_node
   pcl_norm_vis
   bb_pcl_proc_node
+  obs_det_pcl_proc_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

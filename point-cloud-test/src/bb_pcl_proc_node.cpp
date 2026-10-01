@@ -172,13 +172,6 @@ namespace point_cloud_test
 
       if (!latest_object_det_->objects.empty())
       {
-        pcl_cstm_msg::msg::PointCloudArray cluster_msg;
-        cluster_msg.header.stamp = now();
-        cluster_msg.header.frame_id = "plantation";
-
-        pcl_cstm_msg::msg::VCylindersFit cyl_array_msg;
-        cyl_array_msg.header.stamp = now();
-        cyl_array_msg.header.frame_id = "plantation";
 
         std::vector<CylinderParams> params_vec;
         params_vec.reserve(latest_object_det_->objects.size());
@@ -228,8 +221,6 @@ namespace point_cloud_test
             is_valid++;
             RCLCPP_INFO(get_logger(), "Cylinder Tracked: height %lf radius %lf, valid: %d", cyl_msg.height, cyl_msg.radius, is_valid);
           }
-
-          cyl_array_msg.cylinders.push_back(std::move(cyl_msg));
         }
         auto time_fit_end = std::chrono::high_resolution_clock::now();
 
@@ -238,12 +229,6 @@ namespace point_cloud_test
                 .count() /
             1000.0;
         RCLCPP_INFO(get_logger(), "Total Fit: %lf ms, valid: %d", time_fit_ms, is_valid);
-
-        cluster_pub_->publish(cluster_msg);
-        if (!cyl_array_msg.cylinders.empty())
-        {
-          cylinder_pub_->publish(cyl_array_msg);
-        }
 
         std::vector<TrackedCylinder> tracked;
 
@@ -306,7 +291,7 @@ namespace point_cloud_test
           std::chrono::duration_cast<std::chrono::microseconds>(timer_cb_end - timer_cb_start)
               .count() /
           1000.0;
-      RCLCPP_INFO(get_logger(), "Total Times: %lf ms", timer_cb_ms);
+      // RCLCPP_INFO(get_logger(), "Total Times: %lf ms", timer_cb_ms);
     }
 
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> cloud_sub_;

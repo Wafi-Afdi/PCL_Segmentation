@@ -1,8 +1,9 @@
 voxel_visualizer:
   ros__parameters:
-    voxel_size: 0.1
+    voxel_size: 0.3
     show_cylinders: false
-    show_clusters: true
-    show_cloud: false
+    show_clusters: false
+    show_cloud: true
     show_normals: false
-    show_tracked: true
+    show_tracked: false
+    show_ellipsoids: true
