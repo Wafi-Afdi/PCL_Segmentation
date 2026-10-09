@@ -7,6 +7,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -54,6 +55,7 @@ namespace point_cloud_test
         "object_label_target", 
         {"pohon", "bunga"}
       );
+      this->declare_parameter<std::string>("map_frame", "map");
 
       // ground removal
       this->declare_parameter<int>("ground_removal.method", 1);
@@ -85,6 +87,7 @@ namespace point_cloud_test
       this->get_parameter("voxel_size", voxel_size);
       this->get_parameter("max_pcl_points", max_pcl_points);
       this->get_parameter("callback_time", callback_time);
+      this->get_parameter("map_frame", map_frame_);
 
       object_label_target = this->get_parameter("object_label_target").as_string_array();
 
@@ -110,19 +113,15 @@ namespace point_cloud_test
             SyncPolicyPCLAndPoseStamped(10), cloud_sub_, pose_sub_);
         sync_PCL_PoseStamped_->registerCallback(&BB_PCL_Proc_Node::sync_callback_pose_pcl, this);
       }
-      
-
-      cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-          "/output_cloud", rclcpp::SensorDataQoS());
-
-      cluster_pub_ = create_publisher<pcl_cstm_msg::msg::PointCloudArray>(
-          "/clusters", rclcpp::SensorDataQoS());
 
       cylinder_pub_ = create_publisher<pcl_cstm_msg::msg::VCylindersFit>(
           "/cylinders", rclcpp::SensorDataQoS());
 
       global_cylinder_pub_ = create_publisher<pcl_cstm_msg::msg::TrackedCylinderArray>(
           "/global/cylinders", rclcpp::SensorDataQoS());
+
+      cylinder_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          "/cylinder_markers", rclcpp::QoS(10));
 
       timer_ = create_wall_timer(
           std::chrono::milliseconds(callback_time),
@@ -131,6 +130,96 @@ namespace point_cloud_test
     }
 
   private:
+    /* Palet warna untuk visualisasi di RVIZ melalui Visualization Markers*/
+    std::array<float, 4> marker_color_for_label(const std::string &label) const
+    {
+      static constexpr std::array<std::array<float, 3>, 8> palette{{
+          {{0.90f, 0.15f, 0.15f}},
+          {{0.15f, 0.75f, 0.20f}},
+          {{0.15f, 0.35f, 0.95f}},
+          {{0.95f, 0.70f, 0.10f}},
+          {{0.70f, 0.20f, 0.90f}},
+          {{0.10f, 0.80f, 0.80f}},
+          {{0.95f, 0.40f, 0.70f}},
+          {{0.55f, 0.35f, 0.15f}},
+      }};
+
+      const auto iterator = std::find(
+          object_label_target.begin(),
+          object_label_target.end(),
+          label);
+
+      const std::size_t label_index = iterator == object_label_target.end()
+          ? 0U
+          : static_cast<std::size_t>(
+                std::distance(object_label_target.begin(), iterator));
+
+      const auto &rgb = palette[label_index % palette.size()];
+      return {rgb[0], rgb[1], rgb[2], 0.80f};
+    }
+
+    void publish_cylinder_markers(
+      const std::vector<TrackedCylinder> &tracked,
+      const rclcpp::Time &stamp
+    )
+    {
+      visualization_msgs::msg::MarkerArray marker_array_msg;
+
+      visualization_msgs::msg::Marker clear_marker;
+      clear_marker.header.stamp = stamp;
+      clear_marker.header.frame_id = map_frame_;
+      clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+      marker_array_msg.markers.push_back(clear_marker);
+
+      for (const auto &cylinder : tracked)
+      {
+        visualization_msgs::msg::Marker marker;
+        marker.header.stamp = stamp;
+        marker.header.frame_id = map_frame_;
+        marker.ns = "bb_cylinders_" + cylinder.type;
+        marker.id = static_cast<int>(cylinder.id);
+        marker.type = visualization_msgs::msg::Marker::CYLINDER;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+
+        marker.pose.position.x = cylinder.center_x;
+        marker.pose.position.y = cylinder.center_y;
+        marker.pose.position.z = cylinder.center_z;
+
+        Eigen::Vector3f z_axis(0.0f, 0.0f, 1.0f);
+        Eigen::Vector3f cylinder_axis(
+            cylinder.dir_x,
+            cylinder.dir_y,
+            cylinder.dir_z);
+        if (cylinder_axis.z() < 0.0f)
+        {
+          cylinder_axis = -cylinder_axis;
+        }
+
+        Eigen::Quaternionf orientation;
+        orientation.setFromTwoVectors(z_axis, cylinder_axis);
+        marker.pose.orientation.x = orientation.x();
+        marker.pose.orientation.y = orientation.y();
+        marker.pose.orientation.z = orientation.z();
+        marker.pose.orientation.w = orientation.w();
+
+        marker.scale.x = 2.0 * cylinder.radius;
+        marker.scale.y = 2.0 * cylinder.radius;
+        marker.scale.z = cylinder.height;
+
+        const auto color = marker_color_for_label(cylinder.type);
+        marker.color.r = color[0];
+        marker.color.g = color[1];
+        marker.color.b = color[2];
+        marker.color.a = color[3];
+
+        marker_array_msg.markers.push_back(std::move(marker));
+      }
+
+      // The DELETEALL marker clears cylinders that disappeared this cycle.
+      cylinder_markers_pub_->publish(marker_array_msg);
+    }
+
+
     void callback_obj_det(const zed_msgs::msg::ObjectsStamped::ConstSharedPtr &obj_det_msg) {
       std::lock_guard<std::mutex> lock(obj_det_mutex_);
       latest_object_det_ = std::make_shared<zed_msgs::msg::ObjectsStamped>(*obj_det_msg);
@@ -282,7 +371,10 @@ namespace point_cloud_test
         }
 
         global_cylinder_pub_->publish(tracked_msg);
+          
+        publish_cylinder_markers(tracked, now());
       }
+
 
       to_process->clear();
       auto timer_cb_end = std::chrono::high_resolution_clock::now();
@@ -309,10 +401,9 @@ namespace point_cloud_test
     using SynchronizerPCLAndOdometry = message_filters::Synchronizer<SyncPolicyPCLAndOdometry>;
     std::shared_ptr<SynchronizerPCLAndOdometry> sync_PCL_Odometry_;
 
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_;
-    rclcpp::Publisher<pcl_cstm_msg::msg::PointCloudArray>::SharedPtr cluster_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::VCylindersFit>::SharedPtr cylinder_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinder_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr cylinder_markers_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::mutex obj_det_mutex_;
@@ -340,6 +431,7 @@ namespace point_cloud_test
     float regionGrowing_curvature_threshold = 1.0;
 
     std::vector<std::string> object_label_target = {"pohon", "bunga"};
+    std::string map_frame_ = "map";
   };
 
 } // namespace point_cloud_test

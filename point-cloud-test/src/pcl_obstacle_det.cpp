@@ -6,6 +6,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -50,6 +51,7 @@ namespace point_cloud_test
       this->declare_parameter<int>("callback_time", 500);
       this->declare_parameter<bool>("is_log_enabled", true);
       this->declare_parameter<std::string>("output_frame", "map");
+      this->declare_parameter<std::string>("map_frame", "map");
 
       // ground removal
       this->declare_parameter<int>("ground_removal.method", 1);
@@ -58,7 +60,8 @@ namespace point_cloud_test
       this->ground_removal_method = castGroundRemovalMethod(ground_removal_method_params);
 
       // clustering params
-      this->declare_parameter<int>("clustering.max_points", 10);
+      this->declare_parameter<int>("clustering.max_points", 80);
+      this->declare_parameter<int>("clustering.split_cluster_threshold", 250);
       this->declare_parameter<int>("clustering.min_points", 2);
       this->declare_parameter<float>("clustering.distance_thresh", 0.5);
       this->declare_parameter<float>("clustering.ellipsoid_extended_radii", 1.73589);
@@ -67,6 +70,7 @@ namespace point_cloud_test
       this->get_parameter("clustering.min_points", min_cluster_points);
       this->get_parameter("clustering.distance_thresh", cluster_distance_thresh);
       this->get_parameter("clustering.ellipsoid_extended_radii", ellipsoids_extended_radii);
+      this->get_parameter("clustering.split_cluster_threshold", split_threshold);
 
       bool is_use_odom_pcl_pair = false;
       int callback_time = 500;
@@ -77,6 +81,7 @@ namespace point_cloud_test
       this->get_parameter("callback_time", callback_time);
       this->get_parameter("is_log_enabled", is_log_time);
       this->get_parameter("output_frame", output_frame_);
+      this->get_parameter("map_frame", map_frame_);
       this->get_parameter("is_sim", is_sim);
 
       rclcpp::SubscriptionOptions sub_opts;
@@ -117,6 +122,9 @@ namespace point_cloud_test
       ellipsoids_pub_ = create_publisher<pcl_cstm_msg::msg::AxisAlignedElipsoidArray>(
           "/ellipsoids",
           rclcpp::SensorDataQoS());
+      ellipsoid_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          "/ellipsoids/markers",
+          rclcpp::QoS(10));
       cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
           "/output_cloud", rclcpp::SensorDataQoS());
       timer_ = create_wall_timer(
@@ -341,7 +349,7 @@ namespace point_cloud_test
               non_ground,
               min_cluster_points,   // min_points
               max_cluster_points, // max_points
-              120,
+              split_threshold,
               cluster_distance_thresh,  // cluster_tolerance
               ellipsoids_extended_radii
           );
@@ -360,6 +368,46 @@ namespace point_cloud_test
       int total_ellips = ellipsoids.size();
       ellipsoid_array_msg.elipsoids = std::move(ellipsoids);
       ellipsoids_pub_->publish(ellipsoid_array_msg);
+
+      // Visualize every axis-aligned ellipsoid using one consistent color.
+      // Marker scale is the full diameter, while the custom message stores radii.
+      visualization_msgs::msg::MarkerArray marker_array_msg;
+
+      visualization_msgs::msg::Marker clear_marker;
+      clear_marker.header.stamp = latest_stamp;
+      clear_marker.header.frame_id = map_frame_;
+      clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+      marker_array_msg.markers.push_back(clear_marker);
+
+
+      for (std::size_t index = 0; index < ellipsoid_array_msg.elipsoids.size(); ++index)
+      {
+        const auto &ellipsoid = ellipsoid_array_msg.elipsoids[index];
+
+        visualization_msgs::msg::Marker marker;
+        marker.header.stamp = latest_stamp;
+        marker.header.frame_id = map_frame_;
+        marker.ns = "pcl_obstacle_ellipsoids";
+        marker.id = static_cast<int>(index);
+        marker.type = visualization_msgs::msg::Marker::SPHERE;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+
+        marker.pose.position = ellipsoid.center;
+        marker.pose.orientation.w = 1.0;
+
+        marker.scale.x = 2.0 * ellipsoid.radii.x;
+        marker.scale.y = 2.0 * ellipsoid.radii.y;
+        marker.scale.z = 2.0 * ellipsoid.radii.z;
+
+        marker.color.r = 1.0f;
+        marker.color.g = 0.30f;
+        marker.color.b = 0.05f;
+        marker.color.a = 0.80f;
+
+        marker_array_msg.markers.push_back(std::move(marker));
+      }
+
+      ellipsoid_markers_pub_->publish(marker_array_msg);
 
       to_process->clear();
       auto timer_cb_end = std::chrono::high_resolution_clock::now();
@@ -416,6 +464,7 @@ namespace point_cloud_test
     rclcpp::Publisher<pcl_cstm_msg::msg::VCylindersFit>::SharedPtr cylinder_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinder_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::AxisAlignedElipsoidArray>::SharedPtr ellipsoids_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr ellipsoid_markers_pub_;
     ;
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -431,9 +480,11 @@ namespace point_cloud_test
     float voxel_size = 0.3f;
     int max_pcl_points = 450000;
     std::string output_frame_ = "map";
+    std::string map_frame_ = "map";
 
     int max_cluster_points = 10;
     int min_cluster_points = 2;
+    int split_threshold = 180;
     float ellipsoids_extended_radii = 1.73859;
     float cluster_distance_thresh = 0.5f;
 

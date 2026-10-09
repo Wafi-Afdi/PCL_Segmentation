@@ -18,6 +18,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(pcl_cstm_msg REQUIRED)
 find_package(zed_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 find_package(PCL 1.12 REQUIRED)
 find_package(VTK REQUIRED)
@@ -82,6 +83,7 @@ ament_target_dependencies(zed_pcl_proc_node
   message_filters
   pcl_cstm_msg
   zed_msgs
+  visualization_msgs
 )
 
 # pcl_norm_vis
@@ -101,6 +103,7 @@ ament_target_dependencies(pcl_norm_vis
   message_filters
   pcl_cstm_msg
   zed_msgs
+  visualization_msgs
 )
 
 # bb_pcl_proc_node
@@ -120,6 +123,7 @@ ament_target_dependencies(bb_pcl_proc_node
   message_filters
   pcl_cstm_msg
   zed_msgs
+  visualization_msgs
 )
 
 # obstacle detection node 
@@ -139,6 +143,7 @@ ament_target_dependencies(obs_det_pcl_proc_node
   message_filters
   pcl_cstm_msg
   zed_msgs
+  visualization_msgs
 )
 
 install(TARGETS

@@ -11,13 +11,16 @@ obstacle_det_pcl_proc_node:
       max_points: 80
       min_points: 2
       distance_thresh: 0.7
+      split_cluster_threshold: 250
       ellipsoid_extended_radii: 1.7320508
-    output_frame: "map"
+    output_frame: map
+    map_frame: map
     ground_removal:
       method: 1 # 0 is PMF, 1 is RANSAC
 
 bb_pcl_proc_node:
   ros__parameters:
+    map_frame: map
     use_odom_pcl_pair: false
     voxel_size: 0.3
     max_pcl_points: 500000
