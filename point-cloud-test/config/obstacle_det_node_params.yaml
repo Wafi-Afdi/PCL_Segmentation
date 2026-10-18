@@ -2,16 +2,16 @@ obstacle_det_pcl_proc_node:
   ros__parameters:
     use_sim_time: true
     is_sim: true
-    use_odom_pcl_pair: false
+    use_odom_pcl_pair: true
     voxel_size: 0.3
     max_pcl_points: 350000
     callback_time: 500
     is_log_enabled: true
     clustering:
-      max_points: 80
+      max_points: 30
       min_points: 2
-      distance_thresh: 0.7
-      split_cluster_threshold: 250
+      distance_thresh: 0.3
+      split_cluster_threshold: 50
       ellipsoid_extended_radii: 1.7320508
     output_frame: map
     map_frame: map
@@ -20,6 +20,7 @@ obstacle_det_pcl_proc_node:
 
 bb_pcl_proc_node:
   ros__parameters:
+    use_sim_time: true
     map_frame: map
     use_odom_pcl_pair: false
     voxel_size: 0.3

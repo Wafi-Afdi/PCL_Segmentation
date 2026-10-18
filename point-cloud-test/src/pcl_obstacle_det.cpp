@@ -100,6 +100,7 @@ namespace point_cloud_test
         sync_PCL_Odometry_ = std::make_shared<SynchronizerPCLAndOdometry>(
             SyncPolicyPCLAndOdometry(10), cloud_sub_, odom_sub_);
         sync_PCL_Odometry_->registerCallback(&PclObstacleDetectionNode::sync_callback_odom_pcl, this);
+        RCLCPP_INFO(get_logger(), "SIM STATUS: %d, running sync odom and pcl", is_sim);
       }
       else
       {
@@ -227,9 +228,9 @@ namespace point_cloud_test
         pcl::CropBox<pcl::PointXYZ> crop_box;
         crop_box.setInputCloud(cloud_NoNaN);
 
-        Eigen::Vector4f min_pt(-10.0f, -10.0f, -20.0f, 1.0f);
+        Eigen::Vector4f min_pt(-3.0f, -3.0f, -3.0f, 1.0f);
         crop_box.setMin(min_pt);
-        Eigen::Vector4f max_pt(10.0f, 10.0f, 20.0f, 1.0f);
+        Eigen::Vector4f max_pt(3.0f, 3.0f, 3.0f, 1.0f);
         crop_box.setMax(max_pt);
 
         crop_box.filter(*cloud_filtered);
@@ -287,7 +288,7 @@ namespace point_cloud_test
             global_pt = R * robot_pt + t;
             p.x = robot_pt.x();
             p.y = robot_pt.y();
-            p.z = robot_pt.z(); // align to z-axis of ekf world space
+            p.z = robot_pt.z(); // align to z-axis of sim world space
           } else {
             robot_pt = optical_pt_;
             global_pt = R * robot_pt + t;

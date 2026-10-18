@@ -127,6 +127,8 @@ namespace point_cloud_test
           std::chrono::milliseconds(callback_time),
           [this]()
           { timer_callback(); });
+
+      RCLCPP_INFO(get_logger(), "BB_PCL_PROC_NODE: Initialized");
     }
 
   private:
