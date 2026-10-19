@@ -228,9 +228,9 @@ namespace point_cloud_test
         pcl::CropBox<pcl::PointXYZ> crop_box;
         crop_box.setInputCloud(cloud_NoNaN);
 
-        Eigen::Vector4f min_pt(-3.0f, -3.0f, -3.0f, 1.0f);
+        Eigen::Vector4f min_pt(-7.0f, -7.0f, -7.0f, 1.0f);
         crop_box.setMin(min_pt);
-        Eigen::Vector4f max_pt(3.0f, 3.0f, 3.0f, 1.0f);
+        Eigen::Vector4f max_pt(7.0f, 7.0f, 7.0f, 1.0f);
         crop_box.setMax(max_pt);
 
         crop_box.filter(*cloud_filtered);
@@ -286,9 +286,9 @@ namespace point_cloud_test
           if (is_sim) {
             robot_pt = R_optical_to_robot_sim_ * optical_pt_;
             global_pt = R * robot_pt + t;
-            p.x = robot_pt.x();
-            p.y = robot_pt.y();
-            p.z = robot_pt.z(); // align to z-axis of sim world space
+            p.x = global_pt.x();
+            p.y = global_pt.y();
+            p.z = global_pt.z(); // align to z-axis of sim world space
           } else {
             robot_pt = optical_pt_;
             global_pt = R * robot_pt + t;
@@ -338,7 +338,7 @@ namespace point_cloud_test
       sensor_msgs::msg::PointCloud2 output_msg;
       pcl::toROSMsg(*non_ground, output_msg);
       output_msg.header.stamp = now();
-      output_msg.header.frame_id = "map";
+      output_msg.header.frame_id = output_frame_;
 
       cloud_pub_->publish(output_msg);
 

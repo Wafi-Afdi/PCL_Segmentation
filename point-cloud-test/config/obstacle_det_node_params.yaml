@@ -8,20 +8,20 @@ obstacle_det_pcl_proc_node:
     callback_time: 500
     is_log_enabled: true
     clustering:
-      max_points: 30
+      max_points: 100
       min_points: 2
-      distance_thresh: 0.3
-      split_cluster_threshold: 50
+      distance_thresh: 0.6
+      split_cluster_threshold: 20
       ellipsoid_extended_radii: 1.7320508
-    output_frame: map
-    map_frame: map
+    output_frame: odom
+    map_frame: odom
     ground_removal:
       method: 1 # 0 is PMF, 1 is RANSAC
 
 bb_pcl_proc_node:
   ros__parameters:
     use_sim_time: true
-    map_frame: map
+    map_frame: odom
     use_odom_pcl_pair: false
     voxel_size: 0.3
     max_pcl_points: 500000
