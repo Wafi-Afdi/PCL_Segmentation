@@ -281,7 +281,7 @@ namespace point_cloud_test
 
           pcl_cstm_msg::msg::CylinderFit cyl_msg;
           cyl_msg.header.stamp = now();
-          cyl_msg.header.frame_id = "plantation";
+          cyl_msg.header.frame_id = map_frame_;
           cyl_msg.radius = params.radius;
           cyl_msg.height = params.height;
           cyl_msg.confidence = params.confidence;
@@ -335,7 +335,7 @@ namespace point_cloud_test
 
         pcl_cstm_msg::msg::TrackedCylinderArray tracked_msg;
         tracked_msg.header.stamp = now();
-        tracked_msg.header.frame_id = "plantation";
+        tracked_msg.header.frame_id = map_frame_;
 
         for (const auto &t : tracked)
         {
@@ -344,7 +344,7 @@ namespace point_cloud_test
           tc_msg.seen_count = t.seen_count;
           tc_msg.missed_count = t.missed_count;
           tc_msg.cylinder.header.stamp = now();
-          tc_msg.cylinder.header.frame_id = "plantation";
+          tc_msg.cylinder.header.frame_id = map_frame_;
           tc_msg.cylinder.radius = t.radius;
           tc_msg.cylinder.height = t.height;
           tc_msg.cylinder.confidence = t.confidence;

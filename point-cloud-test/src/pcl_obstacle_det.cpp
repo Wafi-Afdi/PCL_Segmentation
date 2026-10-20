@@ -128,6 +128,11 @@ namespace point_cloud_test
           rclcpp::QoS(10));
       cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
           "/output_cloud", rclcpp::SensorDataQoS());
+      global_cylinders_sub_ = create_subscription<pcl_cstm_msg::msg::TrackedCylinderArray>(
+          "/global/cylinders",
+          rclcpp::SensorDataQoS(),
+          std::bind(&PclObstacleDetectionNode::callback_global_cylinders,
+          this, std::placeholders::_1));
       timer_ = create_wall_timer(
           std::chrono::milliseconds(callback_time),
           [this]()
@@ -135,6 +140,73 @@ namespace point_cloud_test
     }
 
   private:
+
+    void callback_global_cylinders(
+      const pcl_cstm_msg::msg::TrackedCylinderArray::ConstSharedPtr &msg
+    )
+    {
+      std::lock_guard<std::mutex> lock(global_cylinders_mutex_);
+      latest_global_cylinders_ = msg;
+    }
+
+
+    void append_global_cylinder_ellipsoids(
+      std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> &ellipsoids
+    )
+    {
+      pcl_cstm_msg::msg::TrackedCylinderArray::ConstSharedPtr global_cylinders;
+      {
+        std::lock_guard<std::mutex> lock(global_cylinders_mutex_);
+        global_cylinders = latest_global_cylinders_;
+      }
+
+      if (!global_cylinders)
+      {
+        return;
+      }
+
+      for (const auto &tracked : global_cylinders->cylinders)
+      {
+        const auto &cylinder = tracked.cylinder;
+        const double radius = cylinder.radius;
+        const double half_height = 0.5 * cylinder.height;
+
+        if (!cylinder.is_valid ||
+            !std::isfinite(radius) || !std::isfinite(half_height) ||
+            radius <= 0.0 || half_height <= 0.0)
+        {
+          continue;
+        }
+
+        // Cylinder local Z axis, expressed in the global frame.
+        const auto &rotation = cylinder.pose.orientation;
+        Eigen::Quaterniond q(rotation.w, rotation.x, rotation.y, rotation.z);
+        if (!std::isfinite(q.norm()) || q.squaredNorm() < 1e-12)
+        {
+          continue;
+        }
+        q.normalize();
+        const Eigen::Vector3d axis = q * Eigen::Vector3d::UnitZ();
+
+        // Half-size of the cylinder's axis-aligned bounding box. These
+        // values provide an axis-aligned ellipsoid approximation even when
+        // the cylinder is tilted. For a vertical cylinder: (r, r, h/2).
+        const auto projected_radius = [radius, half_height](double axis_component) {
+          const double a = std::max(-1.0, std::min(1.0, axis_component));
+          return half_height * std::abs(a) +
+                 radius * std::sqrt(std::max(0.0, 1.0 - a * a));
+        };
+
+        pcl_cstm_msg::msg::AxisAlignedElipsoid ellipsoid;
+        ellipsoid.center = cylinder.pose.position;
+        ellipsoid.radii.x = projected_radius(axis.x());
+        ellipsoid.radii.y = projected_radius(axis.y());
+        ellipsoid.radii.z = projected_radius(axis.z());
+
+        ellipsoids.push_back(std::move(ellipsoid));
+      }
+    }
+
     void sync_callback_pose_pcl(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
         const geometry_msgs::msg::PoseStamped::ConstSharedPtr &pose_msg)
@@ -355,6 +427,11 @@ namespace point_cloud_test
               ellipsoids_extended_radii
           );
 
+      append_global_cylinder_ellipsoids(ellipsoids);
+
+      const std::size_t pcl_ellipsoid_count = ellipsoids.size();
+      const std::size_t global_cylinder_count = ellipsoids.size() - pcl_ellipsoid_count;
+
       auto time_cluster_end = std::chrono::high_resolution_clock::now();
       double time_cluster_ms =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -421,13 +498,15 @@ namespace point_cloud_test
         RCLCPP_INFO(
           get_logger(),
           "Summary:\n"
-          "  Total Ellipsoid: %d\n"
+          "  Total Ellipsoid: %d (PCL: %zu, Cylinders: %zu)\n"
           "  Total Points Processed: %d\n"
           "  Total Time: %.3f ms\n"
           "  Ellipsoid Fit and Cluster: %.3f ms\n"
           "  Ground Removal Time: %.3f ms\n"
           "  Filter Time: %.3f ms",
           total_ellips,
+          pcl_ellipsoid_count,
+          global_cylinder_count,
           total_point_clouds,
           timer_cb_ms,
           time_cluster_ms,
@@ -440,6 +519,7 @@ namespace point_cloud_test
     message_filters::Subscriber<geometry_msgs::msg::PoseStamped> ekf_pose_sub_;
     message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_;
     message_filters::Subscriber<geometry_msgs::msg::PoseStamped> zed_pose_sub_;
+    rclcpp::Subscription<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinders_sub_;
 
     /* Synch Policy */
     using SyncPolicyPCLAndOdometry = message_filters::sync_policies::ApproximateTime<
@@ -466,8 +546,10 @@ namespace point_cloud_test
     rclcpp::Publisher<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinder_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::AxisAlignedElipsoidArray>::SharedPtr ellipsoids_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr ellipsoid_markers_pub_;
-    ;
     rclcpp::TimerBase::SharedPtr timer_;
+
+    std::mutex global_cylinders_mutex_;
+    pcl_cstm_msg::msg::TrackedCylinderArray::ConstSharedPtr latest_global_cylinders_;
 
     /* Mutex */
     std::shared_ptr<std::vector<CloudPosePair>> write_buffer_{
