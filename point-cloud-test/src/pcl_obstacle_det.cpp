@@ -427,9 +427,10 @@ namespace point_cloud_test
               ellipsoids_extended_radii
           );
 
+      const std::size_t pcl_ellipsoid_count = ellipsoids.size();
+
       append_global_cylinder_ellipsoids(ellipsoids);
 
-      const std::size_t pcl_ellipsoid_count = ellipsoids.size();
       const std::size_t global_cylinder_count = ellipsoids.size() - pcl_ellipsoid_count;
 
       auto time_cluster_end = std::chrono::high_resolution_clock::now();

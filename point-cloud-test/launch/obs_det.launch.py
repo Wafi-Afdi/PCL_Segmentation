@@ -81,6 +81,7 @@ def generate_launch_description():
                 ('/zed/zed_node/pose', LaunchConfiguration('zed_pose_topic')),
                 ('/odom', LaunchConfiguration('odom_topic')),
                 ('/ellipsoids', LaunchConfiguration('output_ellipsoids')),
+                ('/global/cylinders', '/global_cylinders'),
             ],
             parameters=[
                 LaunchConfiguration('yaml_params_file'),
