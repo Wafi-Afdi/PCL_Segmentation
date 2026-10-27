@@ -50,6 +50,9 @@ namespace point_cloud_test
       this->declare_parameter<int>("max_pcl_points", 200000);
       this->declare_parameter<int>("callback_time", 500);
       this->declare_parameter<bool>("is_log_enabled", true);
+      this->declare_parameter<bool>("is_lidar", false);
+      this->declare_parameter<float>("lidar_dist_thresh", 0.10);
+      this->declare_parameter<int>("max_pcl_odom_pair", 10);
       this->declare_parameter<std::string>("output_frame", "map");
       this->declare_parameter<std::string>("map_frame", "map");
 
@@ -78,11 +81,14 @@ namespace point_cloud_test
       this->get_parameter("use_odom_pcl_pair", is_use_odom_pcl_pair);
       this->get_parameter("voxel_size", voxel_size);
       this->get_parameter("max_pcl_points", max_pcl_points);
+      this->get_parameter("max_pcl_odom_pair", max_odom_pcl_pair);
       this->get_parameter("callback_time", callback_time);
       this->get_parameter("is_log_enabled", is_log_time);
       this->get_parameter("output_frame", output_frame_);
       this->get_parameter("map_frame", map_frame_);
       this->get_parameter("is_sim", is_sim);
+      this->get_parameter("is_lidar", is_lidar);
+      this->get_parameter("lidar_dist_thresh", lidar_dist_thresh);
 
       rclcpp::SubscriptionOptions sub_opts;
       rclcpp::CallbackGroup::SharedPtr sync_cb_group = create_callback_group(
@@ -265,9 +271,9 @@ namespace point_cloud_test
       int processed_count = 0;
       for (const auto &pair : *to_process)
       {
-        if (processed_count >= 10)
+        if (processed_count >= max_odom_pcl_pair)
         {
-          break; // Stop the loop after 7 pairs
+          break; // Stop the loop after max_odom_pcl_pair pairs
         }
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::fromROSMsg(*pair.cloud, *cloud);
@@ -347,21 +353,37 @@ namespace point_cloud_test
           }
 
           Eigen::Vector3f optical_pt_(pt.x, pt.y, pt.z);
-
-          if (optical_pt_.norm() > 20.0f)
+          float dist_norm = optical_pt_.norm();
+          if (dist_norm > 20.0f || dist_norm < lidar_dist_thresh)
           {
             continue;
           }
           
           Eigen::Vector3f global_pt, robot_pt;
           pcl::PointXYZ p;
-          if (is_sim) {
+          if (is_sim && !is_lidar) {
+            // sim pakai kamera
             robot_pt = R_optical_to_robot_sim_ * optical_pt_;
             global_pt = R * robot_pt + t;
             p.x = global_pt.x();
             p.y = global_pt.y();
             p.z = global_pt.z(); // align to z-axis of sim world space
+          } else if (is_sim && is_lidar) {
+            // sim pakai lidar
+            robot_pt = optical_pt_;
+            global_pt = R * robot_pt + t;
+            p.x = global_pt.x();
+            p.y = global_pt.y();
+            p.z = global_pt.z(); // align to z-axis of sim world space
+          } else if (is_lidar) {
+            // real pakai lidar
+            robot_pt = optical_pt_;
+            global_pt = R * robot_pt + t;
+            p.x = global_pt.x();
+            p.y = global_pt.y();
+            p.z = global_pt.z(); // align to z-axis of sim world space
           } else {
+            // kondisi real pakai zed
             robot_pt = optical_pt_;
             global_pt = R * robot_pt + t;
             p.x = global_pt.x();
@@ -563,6 +585,7 @@ namespace point_cloud_test
 
     float voxel_size = 0.3f;
     int max_pcl_points = 450000;
+    int max_odom_pcl_pair = 10;
     std::string output_frame_ = "map";
     std::string map_frame_ = "map";
 
@@ -577,9 +600,11 @@ namespace point_cloud_test
     float heightDifference = 0.0f; // perbedaan axis z di ekf dan zed
     float zed_pose_z = 0.0f;
     float ekf_pose_z = 0.0f;
+    float lidar_dist_thresh = 0.3f;
 
     bool is_log_time = true;
     bool is_sim = false;
+    bool is_lidar = false;
 
     Eigen::Matrix3f R_optical_to_robot_sim_{
         (Eigen::Matrix3f() << 0, 0, 1,
