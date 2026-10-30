@@ -6,15 +6,17 @@ obstacle_det_pcl_proc_node:
     voxel_size: 0.3
     max_pcl_points: 350000
     callback_time: 500
+    cloud_history_seconds: 10.0 # Rolling observation window 
+    max_history_clouds: 200
     is_log_enabled: true
     lidar_dist_thresh: 0.1
     is_lidar: true
     max_pcl_odom_pair: 10
     clustering:
-      max_points: 100
+      max_points: 60
       min_points: 2
       distance_thresh: 0.6
-      split_cluster_threshold: 20
+      split_cluster_threshold: 10
       ellipsoid_extended_radii: 1.7320508
     output_frame: odom
     map_frame: odom
