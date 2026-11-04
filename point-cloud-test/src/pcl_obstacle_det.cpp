@@ -1,6 +1,8 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <cmath>
+#include <stdexcept>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -68,12 +70,33 @@ namespace point_cloud_test
       this->declare_parameter<int>("clustering.min_points", 2);
       this->declare_parameter<float>("clustering.distance_thresh", 0.5);
       this->declare_parameter<float>("clustering.ellipsoid_extended_radii", 1.73589);
+      // Bounds apply to each split point group before ellipsoid inflation.
+      this->declare_parameter<double>("clustering.max_cluster_extent", 0.9);
+      // Minimum half-size prevents zero radii for thin groups/singletons.
+      this->declare_parameter<double>("clustering.min_half_extent", 0.15);
 
       this->get_parameter("clustering.max_points", max_cluster_points);
       this->get_parameter("clustering.min_points", min_cluster_points);
       this->get_parameter("clustering.distance_thresh", cluster_distance_thresh);
       this->get_parameter("clustering.ellipsoid_extended_radii", ellipsoids_extended_radii);
       this->get_parameter("clustering.split_cluster_threshold", split_threshold);
+      this->get_parameter("clustering.max_cluster_extent", max_cluster_extent_);
+      this->get_parameter("clustering.min_half_extent", min_half_extent_);
+
+      // Validate once at startup, before processing point-cloud callbacks.
+      if (min_cluster_points < 1 || max_cluster_points < 1 || split_threshold < 1 ||
+          !std::isfinite(cluster_distance_thresh) || cluster_distance_thresh <= 0.0f ||
+          !std::isfinite(ellipsoids_extended_radii) || ellipsoids_extended_radii <= 0.0f ||
+          !std::isfinite(max_cluster_extent_) || max_cluster_extent_ <= 0.0 ||
+          !std::isfinite(min_half_extent_) || min_half_extent_ <= 0.0 ||
+          !std::isfinite(static_cast<float>(max_cluster_extent_)) ||
+          static_cast<float>(max_cluster_extent_) <= 0.0f ||
+          !std::isfinite(static_cast<float>(min_half_extent_)) ||
+          static_cast<float>(min_half_extent_) <= 0.0f)
+      {
+        throw std::invalid_argument(
+            "Ellipsoid clustering sizes, distances and scales must be finite and positive");
+      }
 
       bool is_use_odom_pcl_pair = false;
       int callback_time = 500;
@@ -446,7 +469,9 @@ namespace point_cloud_test
               max_cluster_points, // max_points
               split_threshold,
               cluster_distance_thresh,  // cluster_tolerance
-              ellipsoids_extended_radii
+              ellipsoids_extended_radii,
+              static_cast<float>(max_cluster_extent_),
+              static_cast<float>(min_half_extent_)
           );
 
       const std::size_t pcl_ellipsoid_count = ellipsoids.size();
@@ -593,6 +618,8 @@ namespace point_cloud_test
     int min_cluster_points = 2;
     int split_threshold = 180;
     float ellipsoids_extended_radii = 1.73859;
+    double max_cluster_extent_ = 0.9;
+    double min_half_extent_ = 0.15;
     float cluster_distance_thresh = 0.5f;
 
     GroundRemovalMethod ground_removal_method = RANSAC;

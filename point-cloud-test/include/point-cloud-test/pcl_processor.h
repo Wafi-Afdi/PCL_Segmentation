@@ -1,6 +1,12 @@
 #ifndef POINT_CLOUD_TEST__PCL_PROCESSOR_H_
 #define POINT_CLOUD_TEST__PCL_PROCESSOR_H_
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 #include <iostream>
 #include <chrono>
 
@@ -610,102 +616,92 @@ inline std::shared_ptr<pcl_cstm_msg::msg::VNormals> get_normals(
   return normals_msg;
 }
 
+// Split until BOTH point count and physical extent are acceptable.
+// Existing callers retain source compatibility through the trailing default.
 inline void splitClusterByTargetSize(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud,
     const std::vector<int> &indices,
     int target_cluster_size,
     int split_threshold,
-    std::vector<std::vector<int>> &output)
+    std::vector<std::vector<int>> &output,
+    float max_cluster_extent = 0.9f)
 {
-  // Small cluster keep
-  if (indices.size() <= static_cast<size_t>(split_threshold))
+  if (target_cluster_size < 1 || split_threshold < 1 ||
+      !std::isfinite(max_cluster_extent) || max_cluster_extent <= 0.0f)
+  {
+    throw std::invalid_argument("Cluster sizes and extent must be positive");
+  }
+
+  if (!cloud || indices.empty())
+  {
+    return;
+  }
+
+  pcl::PointXYZ min_pt, max_pt;
+  pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
+
+  const float extent[3] = {
+      max_pt.x - min_pt.x,
+      max_pt.y - min_pt.y,
+      max_pt.z - min_pt.z};
+
+  int axis = 0;
+  if (extent[1] > extent[axis])
+  {
+    axis = 1;
+  }
+  if (extent[2] > extent[axis])
+  {
+    axis = 2;
+  }
+
+  // Both existing point-count parameters act as leaf-size upper bounds.
+  const auto point_limit = static_cast<std::size_t>(
+      std::min(target_cluster_size, split_threshold));
+
+  if (indices.size() == 1 ||
+      (indices.size() <= point_limit && extent[axis] <= max_cluster_extent))
   {
     output.push_back(indices);
     return;
   }
 
-  Eigen::Vector4f min_pt, max_pt;
-  pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
+  const auto coordinate = [axis](const pcl::PointXYZ &point) {
+    if (axis == 0)
+    {
+      return point.x;
+    }
+    if (axis == 1)
+    {
+      return point.y;
+    }
+    return point.z;
+  };
 
-  const float size_x = max_pt.x() - min_pt.x();
-  const float size_y = max_pt.y() - min_pt.y();
-  const float size_z = max_pt.z() - min_pt.z();
+  std::vector<int> partitioned = indices;
+  const std::size_t middle = partitioned.size() / 2;
 
-  // Split on the bigget axis
-  int axis = 0;
-
-  if (size_y > size_x)
-    axis = 1;
-
-  if (size_z > (axis == 0 ? size_x : size_y))
-    axis = 2;
-
-  std::vector<int> sorted_indices = indices;
-
-  std::sort(
-      sorted_indices.begin(),
-      sorted_indices.end(),
-      [&](int a, int b)
-      {
-        const auto &pa = cloud->points[a];
-        const auto &pb = cloud->points[b];
-
-        if (axis == 0)
-          return pa.x < pb.x;
-
-        if (axis == 1)
-          return pa.y < pb.y;
-
-        return pa.z < pb.z;
+  // Median partition produces two nonempty children, even for duplicate
+  // coordinates. Recompute bounds/axis for each child on the next call.
+  std::nth_element(
+      partitioned.begin(), partitioned.begin() + middle, partitioned.end(),
+      [&](int left, int right) {
+        const float a = coordinate(cloud->points[left]);
+        const float b = coordinate(cloud->points[right]);
+        return a < b || (a == b && left < right);
       });
 
-  // Decide how many pieces we approximately want
-  const size_t cluster_size = sorted_indices.size();
+  const std::vector<int> left(
+      partitioned.begin(), partitioned.begin() + middle);
+  const std::vector<int> right(
+      partitioned.begin() + middle, partitioned.end());
 
-  size_t number_of_parts =
-      static_cast<size_t>(
-          std::ceil(
-              static_cast<double>(cluster_size) /
-              static_cast<double>(target_cluster_size)));
-
-  number_of_parts = std::max<size_t>(2, number_of_parts);
-
-  // Divide the sorted cluster into approximately equal-sized pieces
-  const size_t base_size = cluster_size / number_of_parts;
-  const size_t remainder = cluster_size % number_of_parts;
-
-  size_t begin = 0;
-
-  for (size_t i = 0; i < number_of_parts; ++i)
-  {
-    size_t part_size =
-        base_size + (i < remainder ? 1 : 0);
-
-    size_t end = begin + part_size;
-
-    std::vector<int> subcluster(
-        sorted_indices.begin() + begin,
-        sorted_indices.begin() + end);
-
-    /*
-      Check cluster that is still too big
-     */
-    if (subcluster.size() > static_cast<size_t>(split_threshold))
-    {
-      splitClusterByTargetSize(
-          cloud,
-          subcluster,
-          target_cluster_size,
-          split_threshold,
-          output);
-    }
-    else
-    {
-      output.push_back(std::move(subcluster));
-    }
-
-    begin = end;
-  }
+  splitClusterByTargetSize(
+      cloud, left, target_cluster_size, split_threshold,
+      output, max_cluster_extent);
+  splitClusterByTargetSize(
+      cloud, right, target_cluster_size, split_threshold,
+      output, max_cluster_extent);
 }
 
 inline std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> fitAxisAlignedEllipsoids(
@@ -714,71 +710,78 @@ inline std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> fitAxisAlignedEllipso
     int target_cluster_size = 80,
     int split_threshold = 120,
     float cluster_tolerance = 0.5f,
-    float radii_scale = 1.7320508f)
+    float radii_scale = 1.7320508f,
+    float max_cluster_extent = 0.9f,
+    float min_half_extent = 0.15f)
 {
   std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> ellipsoids;
 
-  if (!cloud || cloud->points.empty())
+  if (min_points < 1 || target_cluster_size < 1 || split_threshold < 1 ||
+      !std::isfinite(cluster_tolerance) || cluster_tolerance <= 0.0f ||
+      !std::isfinite(radii_scale) || radii_scale <= 0.0f ||
+      !std::isfinite(max_cluster_extent) || max_cluster_extent <= 0.0f ||
+      !std::isfinite(min_half_extent) || min_half_extent <= 0.0f)
+  {
+    throw std::invalid_argument(
+        "Ellipsoid clustering parameters must be finite and positive");
+  }
+
+  if (!cloud || cloud->empty())
   {
     return ellipsoids;
   }
 
-  // 1. Setup KdTree search method for clustering
+  // Input points have already been checked for finiteness by the node.
   pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
-      new pcl::search::KdTree<pcl::PointXYZ>());
+      new pcl::search::KdTree<pcl::PointXYZ>);
   tree->setInputCloud(cloud);
- 
-  // 2. Perform Euclidean Cluster Extraction
+
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
   ec.setClusterTolerance(cluster_tolerance);
   ec.setMinClusterSize(min_points);
-  ec.setMaxClusterSize(
-    static_cast<int>(cloud->size())
-  );
+  // Retain large connected components for subdivision instead of rejecting them.
+  ec.setMaxClusterSize(static_cast<int>(cloud->size()));
   ec.setSearchMethod(tree);
   ec.setInputCloud(cloud);
   ec.extract(cluster_indices);
 
   std::vector<std::vector<int>> final_clusters;
-
-  // split clustes into smaller clusters
   for (const auto &cluster : cluster_indices)
   {
     splitClusterByTargetSize(
-        cloud,
-        cluster.indices,
-        target_cluster_size,
-        split_threshold,
-        final_clusters
-    );
+        cloud, cluster.indices, target_cluster_size, split_threshold,
+        final_clusters, max_cluster_extent);
   }
- 
-  // 3. Fit an Axis-Aligned Ellipsoid for final cluster
+
+  ellipsoids.reserve(final_clusters.size());
   for (const auto &indices : final_clusters)
   {
-    Eigen::Vector4f min_pt, max_pt;
+    pcl::PointXYZ min_pt, max_pt;
     pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
- 
-    pcl_cstm_msg::msg::AxisAlignedElipsoid ellipsoid_msg;
- 
-    // Center of the axis-aligned ellipsoid
-    ellipsoid_msg.center.x = static_cast<double>((min_pt.x() + max_pt.x()) / 2.0f);
-    ellipsoid_msg.center.y = static_cast<double>((min_pt.y() + max_pt.y()) / 2.0f);
-    ellipsoid_msg.center.z = static_cast<double>((min_pt.z() + max_pt.z()) / 2.0f);
- 
-    // Semi-axes radii (a, b, c along X, Y, Z)
-    // CHANGED: each half-extent is multiplied by radii_scale (default sqrt(3)) so the
-    // ellipsoid fully encloses the axis-aligned bounding box instead of sitting inside it.
-    ellipsoid_msg.radii.x = static_cast<double>(radii_scale * (max_pt.x() - min_pt.x()) / 2.0f);
-    ellipsoid_msg.radii.y = static_cast<double>(radii_scale * (max_pt.y() - min_pt.y()) / 2.0f);
-    ellipsoid_msg.radii.z = static_cast<double>(radii_scale * (max_pt.z() - min_pt.z()) / 2.0f);
- 
-    ellipsoids.push_back(ellipsoid_msg);
+
+    pcl_cstm_msg::msg::AxisAlignedElipsoid ellipsoid;
+    ellipsoid.center.x = 0.5 * (static_cast<double>(min_pt.x) + max_pt.x);
+    ellipsoid.center.y = 0.5 * (static_cast<double>(min_pt.y) + max_pt.y);
+    ellipsoid.center.z = 0.5 * (static_cast<double>(min_pt.z) + max_pt.z);
+
+    // Keep thin groups and split-created singletons as finite volumes.
+    // This sets a minimum half-size; it is not padding around every voxel.
+    // With radii_scale=sqrt(3), the padded bounding box is enclosed.
+    ellipsoid.radii.x = radii_scale * std::max(
+        0.5 * (static_cast<double>(max_pt.x) - min_pt.x),
+        static_cast<double>(min_half_extent));
+    ellipsoid.radii.y = radii_scale * std::max(
+        0.5 * (static_cast<double>(max_pt.y) - min_pt.y),
+        static_cast<double>(min_half_extent));
+    ellipsoid.radii.z = radii_scale * std::max(
+        0.5 * (static_cast<double>(max_pt.z) - min_pt.z),
+        static_cast<double>(min_half_extent));
+
+    ellipsoids.push_back(std::move(ellipsoid));
   }
- 
+
   return ellipsoids;
 }
-
 
 #endif // POINT_CLOUD_TEST__PCL_PROCESSOR_H_
