@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <cmath>
+#include <deque>
+#include <stdexcept>
 #include <mutex>
 #include <vector>
 #include <memory>
@@ -51,9 +55,12 @@ namespace point_cloud_test
       this->declare_parameter<float>("voxel_size", 0.3);
       this->declare_parameter<int>("max_pcl_points", 200000);
       this->declare_parameter<int>("callback_time", 500);
+      this->declare_parameter<double>("cloud_history_seconds", 2.0);
+      this->declare_parameter<int>("max_history_clouds", 200);
       this->declare_parameter<bool>("is_log_enabled", true);
       this->declare_parameter<bool>("is_lidar", false);
-      this->declare_parameter<float>("lidar_dist_thresh", 0.10);
+      this->declare_parameter<float>("lidar_min_dist_thresh", 0.10);
+      this->declare_parameter<float>("lidar_max_dist_thresh", 0.10);
       this->declare_parameter<int>("max_pcl_odom_pair", 10);
       this->declare_parameter<std::string>("output_frame", "map");
       this->declare_parameter<std::string>("map_frame", "map");
@@ -106,17 +113,29 @@ namespace point_cloud_test
       this->get_parameter("max_pcl_points", max_pcl_points);
       this->get_parameter("max_pcl_odom_pair", max_odom_pcl_pair);
       this->get_parameter("callback_time", callback_time);
+      this->get_parameter("cloud_history_seconds", cloud_history_seconds_);
+      this->get_parameter("max_history_clouds", max_history_clouds_);
       this->get_parameter("is_log_enabled", is_log_time);
       this->get_parameter("output_frame", output_frame_);
       this->get_parameter("map_frame", map_frame_);
       this->get_parameter("is_sim", is_sim);
       this->get_parameter("is_lidar", is_lidar);
-      this->get_parameter("lidar_dist_thresh", lidar_dist_thresh);
+      this->get_parameter("lidar_min_dist_thresh", lidar_dist_thresh);
+      this->get_parameter("lidar_max_dist_thresh", lidar_dist_max);
+
+      if (!std::isfinite(cloud_history_seconds_) || cloud_history_seconds_ <= 0.0 ||
+          !std::isfinite(voxel_size) || voxel_size <= 0.0f ||
+          max_pcl_points <= 0 || max_odom_pcl_pair <= 0 ||
+          max_history_clouds_ <= 0 || callback_time <= 0)
+      {
+        throw std::invalid_argument(
+            "cloud_history_seconds, voxel_size, max_pcl_points, "
+            "max_pcl_odom_pair, max_history_clouds and callback_time must be positive and finite");
+      }
 
       rclcpp::SubscriptionOptions sub_opts;
-      rclcpp::CallbackGroup::SharedPtr sync_cb_group = create_callback_group(
-          rclcpp::CallbackGroupType::Reentrant);
-      sub_opts.callback_group = sync_cb_group;
+      sync_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+      sub_opts.callback_group = sync_cb_group_;
 
       cloud_sub_.subscribe(this, "/input_cloud",
                            rclcpp::QoS(10).best_effort().get_rmw_qos_profile(), sub_opts);
@@ -169,6 +188,41 @@ namespace point_cloud_test
     }
 
   private:
+    struct PendingCloud
+    {
+      sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud;
+      geometry_msgs::msg::PoseStamped::ConstSharedPtr pose;
+      float height_difference = 0.0f;
+    };
+
+    struct CachedCloud
+    {
+      rclcpp::Time stamp;
+      pcl::PointCloud<pcl::PointXYZ>::ConstPtr cloud;
+    };
+
+    // Called with swap_mutex_ held. Bound raw sensor memory between timer ticks.
+    void enqueue_cloud(PendingCloud pair)
+    {
+      if (write_buffer_->size() >= static_cast<std::size_t>(max_odom_pcl_pair))
+      {
+        write_buffer_->erase(write_buffer_->begin());
+      }
+      write_buffer_->push_back(std::move(pair));
+    }
+
+    // Sensor timestamps and now() must use the same ROS time source.
+    void prune_cloud_history(const rclcpp::Time &current_time)
+    {
+      cloud_history_.erase(
+          std::remove_if(cloud_history_.begin(), cloud_history_.end(),
+              [&](const CachedCloud &entry) {
+                const double age = (current_time - entry.stamp).seconds();
+                return age < 0.0 || age >= cloud_history_seconds_;
+              }),
+          cloud_history_.end());
+    }
+
 
     void callback_global_cylinders(
       const pcl_cstm_msg::msg::TrackedCylinderArray::ConstSharedPtr &msg
@@ -241,7 +295,7 @@ namespace point_cloud_test
         const geometry_msgs::msg::PoseStamped::ConstSharedPtr &pose_msg)
     {
       std::lock_guard<std::mutex> lock(swap_mutex_);
-      write_buffer_->emplace_back(CloudPosePair{cloud_msg, pose_msg});
+      enqueue_cloud(PendingCloud{cloud_msg, pose_msg, 0.0f});
       // RCLCPP_INFO(get_logger(), "Running Pair");
     }
 
@@ -251,10 +305,9 @@ namespace point_cloud_test
         const geometry_msgs::msg::PoseStamped::ConstSharedPtr &zed_pose_msg)
     {
       std::lock_guard<std::mutex> lock(swap_mutex_);
-      write_buffer_->emplace_back(CloudPosePair{cloud_msg, zed_pose_msg});
-      heightDifference = zed_pose_msg->pose.position.z - ekf_pose_msg->pose.position.z;
-      ekf_pose_z = ekf_pose_msg->pose.position.z;
-      zed_pose_z = zed_pose_msg->pose.position.z;
+      const float height_difference =
+          zed_pose_msg->pose.position.z - ekf_pose_msg->pose.position.z;
+      enqueue_cloud(PendingCloud{cloud_msg, zed_pose_msg, height_difference});
       // RCLCPP_INFO(get_logger(), "Running Pair 2");
     }
 
@@ -266,63 +319,49 @@ namespace point_cloud_test
       pose_ptr->pose = odom_msg->pose.pose;
       pose_ptr->header = odom_msg->header;
       std::lock_guard<std::mutex> lock(swap_mutex_);
-      write_buffer_->emplace_back(CloudPosePair{cloud_msg, pose_ptr});
+      enqueue_cloud(PendingCloud{cloud_msg, pose_ptr, 0.0f});
     }
 
     void timer_callback()
     {
       auto timer_cb_start = std::chrono::high_resolution_clock::now();
-      float heightDifferenceCopy = 0.0f;
-      std::shared_ptr<std::vector<CloudPosePair>> to_process;
+      std::shared_ptr<std::vector<PendingCloud>> to_process;
       {
         std::lock_guard<std::mutex> lock(swap_mutex_);
         std::swap(write_buffer_, process_buffer_);
         to_process = process_buffer_;
-        heightDifferenceCopy = this->heightDifference;
       }
-      if (to_process->empty())
+      const rclcpp::Time current_time = now();
+
+      // A simulation or bag restart invalidates observations from the old timeline.
+      if (last_history_time_ && current_time < *last_history_time_)
       {
-        RCLCPP_INFO(get_logger(), "Timer Callback activated, but no point clouds to process");
-        return;
+        cloud_history_.clear();
       }
+      last_history_time_.reset(new rclcpp::Time(current_time));
+      prune_cloud_history(current_time);
 
-      const rclcpp::Time latest_stamp(to_process->back().cloud->header.stamp);
-
-      // Reduce ke 700k jika lebih dari 1,2 juta point cloud
-
-      int total_point_clouds = 0;
-      int processed_count = 0;
-      for (const auto &pair : *to_process)
-      {
-        if (processed_count >= max_odom_pcl_pair)
-        {
-          break; // Stop the loop after max_odom_pcl_pair pairs
-        }
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::fromROSMsg(*pair.cloud, *cloud);
-        total_point_clouds += (cloud->width * cloud->height);
-        processed_count++;
-      }
-
-      pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(
-          new pcl::PointCloud<pcl::PointXYZ>);
-
+      std::size_t total_point_clouds = 0;
+      const std::size_t batch_size = to_process->size();
+      const unsigned int samples_per_pair = batch_size == 0 ? 0 :
+          std::max<std::size_t>(1, static_cast<std::size_t>(max_pcl_points) / batch_size);
       auto time_filter_start = std::chrono::high_resolution_clock::now();
 
-      /* Fusing Point cloud data */
-      processed_count = 0;
-      for (auto it = to_process->rbegin(); it != to_process->rend(); ++it)
+      // Filter and transform NEW scans once; retain their world-frame points.
+      for (const auto &pair : *to_process)
       {
-        if (processed_count >= 8)
+        const rclcpp::Time stamp(pair.cloud->header.stamp, current_time.get_clock_type());
+        const double age = (current_time - stamp).seconds();
+        if (age < 0.0 || age >= cloud_history_seconds_)
         {
-          break;
+          continue;
         }
-        const auto &pair = *it;
-
+        pcl::PointCloud<pcl::PointXYZ>::Ptr world_cloud(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_raw(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_NoNaN(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::fromROSMsg(*pair.cloud, *cloud_raw);
+        total_point_clouds += cloud_raw->size();
         std::vector<int> mapping_indices; // Menyimpan indeks poin yang valid
         pcl::removeNaNFromPointCloud(*cloud_raw, *cloud_NoNaN, mapping_indices);
 
@@ -336,13 +375,17 @@ namespace point_cloud_test
 
         crop_box.filter(*cloud_filtered);
 
+        if (cloud_filtered->empty())
+        {
+          continue;
+        }
+
         pcl::RandomSample<pcl::PointXYZ> random_sampler;
 
-        if (total_point_clouds > max_pcl_points)
+        if (cloud_filtered->size() > samples_per_pair)
         {
           // RCLCPP_INFO(get_logger(), "Resampling");
           pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_sampled(new pcl::PointCloud<pcl::PointXYZ>);
-          unsigned int samples_per_pair = (max_pcl_points / to_process->size());
           random_sampler.setInputCloud(cloud_filtered);
           random_sampler.setSample(samples_per_pair);
 
@@ -356,15 +399,25 @@ namespace point_cloud_test
         voxel.setLeafSize(voxel_size, voxel_size, voxel_size);
         voxel.filter(*filtered);
 
-        pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
-        sor.setInputCloud(filtered);
-        sor.setMeanK(50);            // Default often used is 50
-        sor.setStddevMulThresh(1.0); // Default often used is 1.0
-        sor.filter(*filtered);
+        if (filtered->size() > 2)
+        {
+          pcl::StatisticalOutlierRemoval<pcl::PointXYZ> sor;
+          sor.setInputCloud(filtered);
+          sor.setMeanK(static_cast<int>(std::min<std::size_t>(50, filtered->size() - 1)));
+          sor.setStddevMulThresh(1.0);
+          sor.filter(*filtered);
+        }
 
         const auto &pos = pair.pose->pose.position;
         const auto &q = pair.pose->pose.orientation;
         Eigen::Quaternionf rotation(q.w, q.x, q.y, q.z);
+        if (!rotation.coeffs().allFinite() || rotation.squaredNorm() < 1e-12f ||
+            !std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) ||
+            !std::isfinite(pair.height_difference))
+        {
+          continue;
+        }
+        rotation.normalize();
         Eigen::Matrix3f R = rotation.toRotationMatrix();
         Eigen::Vector3f t(pos.x, pos.y, pos.z);
 
@@ -377,7 +430,7 @@ namespace point_cloud_test
 
           Eigen::Vector3f optical_pt_(pt.x, pt.y, pt.z);
           float dist_norm = optical_pt_.norm();
-          if (dist_norm > 20.0f || dist_norm < lidar_dist_thresh)
+          if (dist_norm > lidar_dist_max || dist_norm < lidar_dist_thresh)
           {
             continue;
           }
@@ -411,11 +464,51 @@ namespace point_cloud_test
             global_pt = R * robot_pt + t;
             p.x = global_pt.x();
             p.y = global_pt.y();
-            p.z = global_pt.z() - heightDifferenceCopy; // align to z-axis of ekf world space
+            p.z = global_pt.z() - pair.height_difference; // align to z-axis of ekf world space
           }
-          merged_cloud->push_back(p);
+          world_cloud->push_back(p);
         }
-        processed_count++;
+        if (!world_cloud->empty())
+        {
+          cloud_history_.push_back(CachedCloud{stamp, world_cloud});
+          if (cloud_history_.size() > static_cast<std::size_t>(max_history_clouds_))
+          {
+            // A safety cap; raise it if your scan rate requires more than 200 scans/window.
+            const auto oldest = std::min_element(
+                cloud_history_.begin(), cloud_history_.end(),
+                [](const CachedCloud &a, const CachedCloud &b) { return a.stamp < b.stamp; });
+            cloud_history_.erase(oldest);
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                "History scan cap reached; max_history_clouds may shorten the time window");
+          }
+        }
+      }
+      // Release raw scans immediately; history owns only filtered world-frame points.
+      to_process->clear();
+
+      pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+      for (const auto &entry : cloud_history_)
+      {
+        *merged_cloud += *entry.cloud;
+      }
+      if (!merged_cloud->empty())
+      {
+        // Merge repeated observations of the same surface before clustering.
+        pcl::PointCloud<pcl::PointXYZ>::Ptr voxelized(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::VoxelGrid<pcl::PointXYZ> voxel;
+        voxel.setInputCloud(merged_cloud);
+        voxel.setLeafSize(voxel_size, voxel_size, voxel_size);
+        voxel.filter(*voxelized);
+        merged_cloud = voxelized;
+        if (merged_cloud->size() > static_cast<std::size_t>(max_pcl_points))
+        {
+          pcl::PointCloud<pcl::PointXYZ>::Ptr sampled(new pcl::PointCloud<pcl::PointXYZ>);
+          pcl::RandomSample<pcl::PointXYZ> sampler;
+          sampler.setInputCloud(merged_cloud);
+          sampler.setSample(static_cast<unsigned int>(max_pcl_points));
+          sampler.filter(*sampled);
+          merged_cloud = sampled;
+        }
       }
 
       auto time_filter_end = std::chrono::high_resolution_clock::now();
@@ -430,8 +523,12 @@ namespace point_cloud_test
       merged_cloud->is_dense = true;
 
       auto time_ransac_start = std::chrono::high_resolution_clock::now();
-      std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> non_ground;
-      if (ground_removal_method == PMF)
+      pcl::PointCloud<pcl::PointXYZ>::Ptr non_ground(new pcl::PointCloud<pcl::PointXYZ>);
+      if (merged_cloud->empty())
+      {
+        // Still publish an empty result so expired obstacles disappear downstream.
+      }
+      else if (ground_removal_method == PMF)
       {
         non_ground = processPMF(merged_cloud);
       }
@@ -442,8 +539,7 @@ namespace point_cloud_test
       if (!non_ground || non_ground->empty())
       {
         RCLCPP_WARN(get_logger(), "Ground removal failed");
-        to_process->clear();
-        return;
+        non_ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
       }
       auto time_ransac_end = std::chrono::high_resolution_clock::now();
       double time_ransac_ms =
@@ -454,7 +550,7 @@ namespace point_cloud_test
 
       sensor_msgs::msg::PointCloud2 output_msg;
       pcl::toROSMsg(*non_ground, output_msg);
-      output_msg.header.stamp = now();
+      output_msg.header.stamp = current_time;
       output_msg.header.frame_id = output_frame_;
 
       cloud_pub_->publish(output_msg);
@@ -462,8 +558,10 @@ namespace point_cloud_test
       /* TODO: Lanjut Bikin AxisAlignedElipsoid disini*/
       auto time_cluster_start = std::chrono::high_resolution_clock::now();
 
-      std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> ellipsoids =
-          fitAxisAlignedEllipsoids(
+      std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> ellipsoids;
+      if (!non_ground->empty())
+      {
+        ellipsoids = fitAxisAlignedEllipsoids(
               non_ground,
               min_cluster_points,   // min_points
               max_cluster_points, // max_points
@@ -473,6 +571,7 @@ namespace point_cloud_test
               static_cast<float>(max_cluster_extent_),
               static_cast<float>(min_half_extent_)
           );
+      }
 
       const std::size_t pcl_ellipsoid_count = ellipsoids.size();
 
@@ -488,7 +587,7 @@ namespace point_cloud_test
 
       /* Publish ellipsoids */
       pcl_cstm_msg::msg::AxisAlignedElipsoidArray ellipsoid_array_msg;
-            ellipsoid_array_msg.header.stamp = latest_stamp;
+      ellipsoid_array_msg.header.stamp = current_time;
       ellipsoid_array_msg.header.frame_id = output_frame_;
 
       int total_ellips = ellipsoids.size();
@@ -500,7 +599,7 @@ namespace point_cloud_test
       visualization_msgs::msg::MarkerArray marker_array_msg;
 
       visualization_msgs::msg::Marker clear_marker;
-      clear_marker.header.stamp = latest_stamp;
+      clear_marker.header.stamp = current_time;
       clear_marker.header.frame_id = map_frame_;
       clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
       marker_array_msg.markers.push_back(clear_marker);
@@ -511,7 +610,7 @@ namespace point_cloud_test
         const auto &ellipsoid = ellipsoid_array_msg.elipsoids[index];
 
         visualization_msgs::msg::Marker marker;
-        marker.header.stamp = latest_stamp;
+        marker.header.stamp = current_time;
         marker.header.frame_id = map_frame_;
         marker.ns = "pcl_obstacle_ellipsoids";
         marker.id = static_cast<int>(index);
@@ -535,7 +634,6 @@ namespace point_cloud_test
 
       ellipsoid_markers_pub_->publish(marker_array_msg);
 
-      to_process->clear();
       auto timer_cb_end = std::chrono::high_resolution_clock::now();
 
       double timer_cb_ms =
@@ -547,7 +645,8 @@ namespace point_cloud_test
           get_logger(),
           "Summary:\n"
           "  Total Ellipsoid: %d (PCL: %zu, Cylinders: %zu)\n"
-          "  Total Points Processed: %d\n"
+          "  New Raw Points Processed: %zu\n"
+          "  History Scans: %zu (window %.2f s)\n"
           "  Total Time: %.3f ms\n"
           "  Ellipsoid Fit and Cluster: %.3f ms\n"
           "  Ground Removal Time: %.3f ms\n"
@@ -556,6 +655,8 @@ namespace point_cloud_test
           pcl_ellipsoid_count,
           global_cylinder_count,
           total_point_clouds,
+          cloud_history_.size(),
+          cloud_history_seconds_,
           timer_cb_ms,
           time_cluster_ms,
           time_ransac_ms,
@@ -595,16 +696,23 @@ namespace point_cloud_test
     rclcpp::Publisher<pcl_cstm_msg::msg::AxisAlignedElipsoidArray>::SharedPtr ellipsoids_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr ellipsoid_markers_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::CallbackGroup::SharedPtr sync_cb_group_;
 
     std::mutex global_cylinders_mutex_;
     pcl_cstm_msg::msg::TrackedCylinderArray::ConstSharedPtr latest_global_cylinders_;
 
     /* Mutex */
-    std::shared_ptr<std::vector<CloudPosePair>> write_buffer_{
-        std::make_shared<std::vector<CloudPosePair>>()};
-    std::shared_ptr<std::vector<CloudPosePair>> process_buffer_{
-        std::make_shared<std::vector<CloudPosePair>>()};
+    std::shared_ptr<std::vector<PendingCloud>> write_buffer_{
+        std::make_shared<std::vector<PendingCloud>>()};
+    std::shared_ptr<std::vector<PendingCloud>> process_buffer_{
+        std::make_shared<std::vector<PendingCloud>>()};
     std::mutex swap_mutex_;
+
+    // Accessed only by the timer's mutually exclusive callback group.
+    std::deque<CachedCloud> cloud_history_;
+    std::unique_ptr<rclcpp::Time> last_history_time_;
+    double cloud_history_seconds_ = 2.0;
+    int max_history_clouds_ = 200;
 
     GlobalCylinderManager global_manager_{2.0f};
 
@@ -624,10 +732,8 @@ namespace point_cloud_test
 
     GroundRemovalMethod ground_removal_method = RANSAC;
 
-    float heightDifference = 0.0f; // perbedaan axis z di ekf dan zed
-    float zed_pose_z = 0.0f;
-    float ekf_pose_z = 0.0f;
     float lidar_dist_thresh = 0.3f;
+    float lidar_dist_max = 10.0f;
 
     bool is_log_time = true;
     bool is_sim = false;
