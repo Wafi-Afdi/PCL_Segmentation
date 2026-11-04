@@ -57,7 +57,8 @@ namespace point_cloud_test
       this->declare_parameter<int>("max_history_clouds", 200);
       this->declare_parameter<bool>("is_log_enabled", true);
       this->declare_parameter<bool>("is_lidar", false);
-      this->declare_parameter<float>("lidar_dist_thresh", 0.10);
+      this->declare_parameter<float>("lidar_min_dist_thresh", 0.10);
+      this->declare_parameter<float>("lidar_max_dist_thresh", 0.10);
       this->declare_parameter<int>("max_pcl_odom_pair", 10);
       this->declare_parameter<std::string>("output_frame", "map");
       this->declare_parameter<std::string>("map_frame", "map");
@@ -96,7 +97,8 @@ namespace point_cloud_test
       this->get_parameter("map_frame", map_frame_);
       this->get_parameter("is_sim", is_sim);
       this->get_parameter("is_lidar", is_lidar);
-      this->get_parameter("lidar_dist_thresh", lidar_dist_thresh);
+      this->get_parameter("lidar_min_dist_thresh", lidar_dist_thresh);
+      this->get_parameter("lidar_max_dist_thresh", lidar_dist_max);
 
       if (!std::isfinite(cloud_history_seconds_) || cloud_history_seconds_ <= 0.0 ||
           !std::isfinite(voxel_size) || voxel_size <= 0.0f ||
@@ -405,7 +407,7 @@ namespace point_cloud_test
 
           Eigen::Vector3f optical_pt_(pt.x, pt.y, pt.z);
           float dist_norm = optical_pt_.norm();
-          if (dist_norm > 20.0f || dist_norm < lidar_dist_thresh)
+          if (dist_norm > lidar_dist_max || dist_norm < lidar_dist_thresh)
           {
             continue;
           }
@@ -513,6 +515,7 @@ namespace point_cloud_test
       }
       if (!non_ground || non_ground->empty())
       {
+        RCLCPP_WARN(get_logger(), "Ground removal failed");
         non_ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
       }
       auto time_ransac_end = std::chrono::high_resolution_clock::now();
@@ -703,6 +706,7 @@ namespace point_cloud_test
     GroundRemovalMethod ground_removal_method = RANSAC;
 
     float lidar_dist_thresh = 0.3f;
+    float lidar_dist_max = 10.0f;
 
     bool is_log_time = true;
     bool is_sim = false;

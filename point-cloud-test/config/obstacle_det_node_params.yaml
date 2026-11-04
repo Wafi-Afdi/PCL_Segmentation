@@ -9,13 +9,14 @@ obstacle_det_pcl_proc_node:
     cloud_history_seconds: 10.0 # Rolling observation window 
     max_history_clouds: 200
     is_log_enabled: true
-    lidar_dist_thresh: 0.1
+    lidar_min_dist_thresh: 0.1
+    lidar_max_dist_thresh: 10.0
     is_lidar: true
     max_pcl_odom_pair: 10
     clustering:
-      max_points: 60
+      max_points: 50
       min_points: 2
-      distance_thresh: 0.6
+      distance_thresh: 0.4
       split_cluster_threshold: 10
       ellipsoid_extended_radii: 1.7320508
     output_frame: odom
