@@ -637,13 +637,13 @@ inline void splitClusterByTargetSize(
     return;
   }
 
-  pcl::PointXYZ min_pt, max_pt;
+  Eigen::Vector4f min_pt, max_pt;
   pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
 
   const float extent[3] = {
-      max_pt.x - min_pt.x,
-      max_pt.y - min_pt.y,
-      max_pt.z - min_pt.z};
+      max_pt.x() - min_pt.x(),
+      max_pt.y() - min_pt.y(),
+      max_pt.z() - min_pt.z()};
 
   int axis = 0;
   if (extent[1] > extent[axis])
@@ -757,25 +757,25 @@ inline std::vector<pcl_cstm_msg::msg::AxisAlignedElipsoid> fitAxisAlignedEllipso
   ellipsoids.reserve(final_clusters.size());
   for (const auto &indices : final_clusters)
   {
-    pcl::PointXYZ min_pt, max_pt;
+    Eigen::Vector4f min_pt, max_pt;
     pcl::getMinMax3D(*cloud, indices, min_pt, max_pt);
 
     pcl_cstm_msg::msg::AxisAlignedElipsoid ellipsoid;
-    ellipsoid.center.x = 0.5 * (static_cast<double>(min_pt.x) + max_pt.x);
-    ellipsoid.center.y = 0.5 * (static_cast<double>(min_pt.y) + max_pt.y);
-    ellipsoid.center.z = 0.5 * (static_cast<double>(min_pt.z) + max_pt.z);
+    ellipsoid.center.x = 0.5 * (static_cast<double>(min_pt.x()) + max_pt.x());
+    ellipsoid.center.y = 0.5 * (static_cast<double>(min_pt.y()) + max_pt.y());
+    ellipsoid.center.z = 0.5 * (static_cast<double>(min_pt.z()) + max_pt.z());
 
     // Keep thin groups and split-created singletons as finite volumes.
     // This sets a minimum half-size; it is not padding around every voxel.
     // With radii_scale=sqrt(3), the padded bounding box is enclosed.
     ellipsoid.radii.x = radii_scale * std::max(
-        0.5 * (static_cast<double>(max_pt.x) - min_pt.x),
+        0.5 * (static_cast<double>(max_pt.x()) - min_pt.x()),
         static_cast<double>(min_half_extent));
     ellipsoid.radii.y = radii_scale * std::max(
-        0.5 * (static_cast<double>(max_pt.y) - min_pt.y),
+        0.5 * (static_cast<double>(max_pt.y()) - min_pt.y()),
         static_cast<double>(min_half_extent));
     ellipsoid.radii.z = radii_scale * std::max(
-        0.5 * (static_cast<double>(max_pt.z) - min_pt.z),
+        0.5 * (static_cast<double>(max_pt.z()) - min_pt.z()),
         static_cast<double>(min_half_extent));
 
     ellipsoids.push_back(std::move(ellipsoid));
