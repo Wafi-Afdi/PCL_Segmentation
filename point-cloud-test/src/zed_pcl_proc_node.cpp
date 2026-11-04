@@ -1,6 +1,11 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <cmath>
+#include <string>
+#include <stdexcept>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <std_msgs/msg/header.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -47,6 +52,11 @@ namespace point_cloud_test
       this->declare_parameter<int>("max_pcl_points", 450000);
       this->declare_parameter<int>("callback_time", 500);
 
+      // All processed coordinates are in the synchronized pose's world frame.
+      // This parameter names that frame; it does not perform a TF conversion.
+      map_frame_ = this->declare_parameter<std::string>("map_frame", "map");
+      cylinder_marker_alpha_ = this->declare_parameter<double>("cylinder_marker_alpha", 0.35);
+
       // ground removal
       this->declare_parameter<int>("ground_removal.method", 1);
       
@@ -55,6 +65,8 @@ namespace point_cloud_test
 
       // clustering params
       this->declare_parameter<int>("clustering_params.method", 0);
+      this->declare_parameter<int>("clustering_params.min_point", 10);
+      this->declare_parameter<int>("clustering_params.max_point", 40);
       this->declare_parameter<float>("clustering_params.euclidean_clustering.max_z_mean", 0.4);
       this->declare_parameter<float>("clustering_params.euclidean_clustering.max_z_variance", 0.1);
       this->declare_parameter<float>("clustering_params.euclidean_clustering.distance_tolerance", 0.5);
@@ -63,6 +75,8 @@ namespace point_cloud_test
       
 
       this->get_parameter("clustering_params.method", clustering_method_params);
+      this->get_parameter("clustering_params.min_point", clustering_method_params);
+      this->get_parameter("clustering_params.max_point", clustering_method_params);
       this->get_parameter("clustering_params.euclidean_clustering.max_z_mean", euclidean_max_z_mean);
       this->get_parameter("clustering_params.euclidean_clustering.max_z_variance", euclidean_max_z_variance);
       this->get_parameter("clustering_params.euclidean_clustering.distance_tolerance", euclidean_max_distance);
@@ -111,6 +125,13 @@ namespace point_cloud_test
       global_cylinder_pub_ = create_publisher<pcl_cstm_msg::msg::TrackedCylinderArray>(
           "/global/cylinders", rclcpp::SensorDataQoS());
 
+      // Retain the latest complete marker batch for RViz subscribers.
+      auto marker_qos = rclcpp::QoS(1).reliable().transient_local();
+      cylinder_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          "/cylinders/markers", marker_qos);
+      global_cylinder_markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+          "/global/cylinders/markers", marker_qos);
+
       timer_ = create_wall_timer(
           std::chrono::milliseconds(callback_time),
           [this]()
@@ -118,6 +139,67 @@ namespace point_cloud_test
     }
 
   private:
+
+    void publishCylinderMarkers(
+        const std::vector<pcl_cstm_msg::msg::CylinderFit> &cylinders,
+        const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &publisher,
+        const std::string &marker_namespace)
+    {
+      visualization_msgs::msg::MarkerArray markers;
+      std_msgs::msg::Header header;
+      header.frame_id = map_frame_;
+      header.stamp = now();
+
+      // Each topic carries a complete snapshot: remove the previous batch,
+      // including IDs that disappeared when fewer cylinders were detected.
+      visualization_msgs::msg::Marker clear;
+      clear.header = header;
+      clear.action = visualization_msgs::msg::Marker::DELETEALL;
+      markers.markers.push_back(clear);
+
+      for (std::size_t index = 0; index < cylinders.size(); ++index)
+      {
+        const auto &cylinder = cylinders[index];
+        const auto &position = cylinder.pose.position;
+        const auto &orientation = cylinder.pose.orientation;
+        const double quaternion_norm = std::sqrt(
+            orientation.x * orientation.x + orientation.y * orientation.y +
+            orientation.z * orientation.z + orientation.w * orientation.w);
+        if (!cylinder.is_valid ||
+            !std::isfinite(cylinder.radius) || cylinder.radius <= 0.0 ||
+            !std::isfinite(cylinder.height) || cylinder.height <= 0.0 ||
+            !std::isfinite(position.x) || !std::isfinite(position.y) ||
+            !std::isfinite(position.z) ||
+            !std::isfinite(quaternion_norm) || quaternion_norm < 1e-12)
+        {
+          continue;
+        }
+
+        visualization_msgs::msg::Marker marker;
+        marker.header = header;
+        marker.ns = marker_namespace;
+        marker.id = static_cast<int>(index);
+        marker.type = visualization_msgs::msg::Marker::CYLINDER;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose = cylinder.pose;
+        marker.pose.orientation.x /= quaternion_norm;
+        marker.pose.orientation.y /= quaternion_norm;
+        marker.pose.orientation.z /= quaternion_norm;
+        marker.pose.orientation.w /= quaternion_norm;
+
+        // RViz uses full diameters in X/Y and full height along local Z.
+        marker.scale.x = 2.0 * cylinder.radius;
+        marker.scale.y = 2.0 * cylinder.radius;
+        marker.scale.z = cylinder.height;
+        marker.color.r = 0.1f;
+        marker.color.g = 0.8f;
+        marker.color.b = 1.0f;
+        marker.color.a = static_cast<float>(cylinder_marker_alpha_);
+        markers.markers.push_back(std::move(marker));
+      }
+
+      publisher->publish(markers);
+    }
 
     void sync_callback_pose_pcl(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg,
@@ -278,6 +360,8 @@ namespace point_cloud_test
       if (!non_ground || non_ground->empty())
       {
         RCLCPP_WARN(get_logger(), "Ground removal failed");
+        publishCylinderMarkers({}, cylinder_markers_pub_, "zed_fitted_cylinders");
+        publishCylinderMarkers({}, global_cylinder_markers_pub_, "zed_tracked_cylinders");
         to_process->clear();
         return;
       }
@@ -293,14 +377,19 @@ namespace point_cloud_test
       sensor_msgs::msg::PointCloud2 output_msg;
       pcl::toROSMsg(*trunk_filter, output_msg);
       output_msg.header.stamp = now();
-      output_msg.header.frame_id = "plantation";
+      output_msg.header.frame_id = map_frame_;
 
       cloud_pub_->publish(output_msg);
 
       auto time_cluster_start = std::chrono::high_resolution_clock::now();
       std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
       if (clustering_method == RegionGrowing) {
-        clusters = clusterTrees_RegionGrowing(trunk_filter, regionGrowing_max_degrees, regionGrowing_curvature_threshold);
+        clusters = clusterTrees_RegionGrowing(trunk_filter, 
+          regionGrowing_max_degrees, 
+          regionGrowing_curvature_threshold, 
+          cluster_min_point,
+          cluster_max_point
+        );
       } else if (clustering_method == EuclideanClustering) {
         clusters = clusterTrees(trunk_filter, euclidean_max_z_mean, euclidean_max_z_variance);
       } else {
@@ -318,11 +407,11 @@ namespace point_cloud_test
       {
         pcl_cstm_msg::msg::PointCloudArray cluster_msg;
         cluster_msg.header.stamp = now();
-        cluster_msg.header.frame_id = "plantation";
+        cluster_msg.header.frame_id = map_frame_;
 
         pcl_cstm_msg::msg::VCylindersFit cyl_array_msg;
         cyl_array_msg.header.stamp = now();
-        cyl_array_msg.header.frame_id = "plantation";
+        cyl_array_msg.header.frame_id = map_frame_;
 
         std::vector<CylinderParams> params_vec;
         params_vec.reserve(clusters.size());
@@ -335,7 +424,7 @@ namespace point_cloud_test
           sensor_msgs::msg::PointCloud2 cluster_cloud;
           pcl::toROSMsg(*cluster, cluster_cloud);
           cluster_cloud.header.stamp = now();
-          cluster_cloud.header.frame_id = "plantation";
+          cluster_cloud.header.frame_id = map_frame_;
           cluster_msg.clouds.push_back(std::move(cluster_cloud));
 
           auto params = fitCylinderZAxis(cluster);
@@ -343,7 +432,7 @@ namespace point_cloud_test
 
           pcl_cstm_msg::msg::CylinderFit cyl_msg;
           cyl_msg.header.stamp = now();
-          cyl_msg.header.frame_id = "plantation";
+          cyl_msg.header.frame_id = map_frame_;
           cyl_msg.radius = params.radius;
           cyl_msg.height = params.height;
           cyl_msg.confidence = params.confidence;
@@ -397,6 +486,8 @@ namespace point_cloud_test
         {
           cylinder_pub_->publish(cyl_array_msg);
         }
+        publishCylinderMarkers(
+            cyl_array_msg.cylinders, cylinder_markers_pub_, "zed_fitted_cylinders");
 
         std::vector<TrackedCylinder> tracked;
 
@@ -412,8 +503,11 @@ namespace point_cloud_test
 
         pcl_cstm_msg::msg::TrackedCylinderArray tracked_msg;
         tracked_msg.header.stamp = now();
-        tracked_msg.header.frame_id = "plantation";
+        tracked_msg.header.frame_id = map_frame_;
 
+        // Reuse the same geometry/orientation for tracked RViz cylinders.
+        std::vector<pcl_cstm_msg::msg::CylinderFit> tracked_visualization;
+        tracked_visualization.reserve(tracked.size());
         for (const auto &t : tracked)
         {
           pcl_cstm_msg::msg::TrackedCylinder tc_msg;
@@ -421,7 +515,7 @@ namespace point_cloud_test
           tc_msg.seen_count = t.seen_count;
           tc_msg.missed_count = t.missed_count;
           tc_msg.cylinder.header.stamp = now();
-          tc_msg.cylinder.header.frame_id = "plantation";
+          tc_msg.cylinder.header.frame_id = map_frame_;
           tc_msg.cylinder.radius = t.radius;
           tc_msg.cylinder.height = t.height;
           tc_msg.cylinder.confidence = t.confidence;
@@ -445,10 +539,18 @@ namespace point_cloud_test
           tc_msg.cylinder.pose.orientation.w = q.w();
 
           tc_msg.cylinder.is_valid = true;
+          tracked_visualization.push_back(tc_msg.cylinder);
           tracked_msg.cylinders.push_back(std::move(tc_msg));
         }
 
         global_cylinder_pub_->publish(tracked_msg);
+        publishCylinderMarkers(
+            tracked_visualization, global_cylinder_markers_pub_, "zed_tracked_cylinders");
+      }
+      else
+      {
+        publishCylinderMarkers({}, cylinder_markers_pub_, "zed_fitted_cylinders");
+        publishCylinderMarkers({}, global_cylinder_markers_pub_, "zed_tracked_cylinders");
       }
 
       to_process->clear();
@@ -481,7 +583,13 @@ namespace point_cloud_test
     rclcpp::Publisher<pcl_cstm_msg::msg::PointCloudArray>::SharedPtr cluster_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::VCylindersFit>::SharedPtr cylinder_pub_;
     rclcpp::Publisher<pcl_cstm_msg::msg::TrackedCylinderArray>::SharedPtr global_cylinder_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr cylinder_markers_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr global_cylinder_markers_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+
+    std::string map_frame_;
+    double cylinder_marker_alpha_ = 0.35;
+    double cylinder_marker_lifetime_ = 2.0;
 
     std::shared_ptr<std::vector<CloudPosePair>> write_buffer_{
         std::make_shared<std::vector<CloudPosePair>>()};
@@ -502,6 +610,8 @@ namespace point_cloud_test
     float euclidean_max_distance = 0.5;
     float regionGrowing_max_degrees = 3.0;
     float regionGrowing_curvature_threshold = 1.0;
+    int cluster_max_point = 5000;
+    int cluster_min_point = 10;
   };
 
 } // namespace point_cloud_test

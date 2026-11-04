@@ -260,7 +260,9 @@ inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees(
 inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees_RegionGrowing(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_trees,
     float maxDegrees = 3.0,
-    float curvatureThreshold = 1.0
+    float curvatureThreshold = 1.0,
+    int cluster_min_point = 10,
+    int cluster_max_point = 5000
   )
 {
   pcl::search::Search<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
@@ -276,8 +278,8 @@ inline std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusterTrees_RegionGrowi
   pcl::removeNaNFromPointCloud(*cloud_trees, *indices);
 
   pcl::RegionGrowing<pcl::PointXYZ, pcl::Normal> reg;
-  reg.setMinClusterSize(40);   // Retained your original min size
-  reg.setMaxClusterSize(5000); // Retained your original max size
+  reg.setMinClusterSize(cluster_min_point);   // Retained your original min size
+  reg.setMaxClusterSize(cluster_max_point); // Retained your original max size
   reg.setSearchMethod(tree);
   reg.setNumberOfNeighbours(5);
   reg.setInputCloud(cloud_trees);

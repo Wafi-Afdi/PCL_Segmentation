@@ -17,7 +17,7 @@ obstacle_det_pcl_proc_node:
       max_points: 50
       min_points: 2
       distance_thresh: 0.4
-      split_cluster_threshold: 10
+      split_cluster_threshold: 20
       ellipsoid_extended_radii: 1.7320508
     output_frame: odom
     map_frame: odom

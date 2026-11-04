@@ -1,17 +1,22 @@
 zed_pcl_proc_node:
   ros__parameters:
-    use_odom_pcl_pair: false
-    voxel_size: 0.3
+    use_sim_time: true
+    use_odom_pcl_pair: true
+    voxel_size: 0.2
+    cylinder_marker_alpha: 0.5
+    map_frame: map
     max_pcl_points: 500000
     callback_time: 500
     clustering_params:
-      method: 1 # 0 is RegionGrowing, 1 is EuclideanCluster
+      min_point: 10
+      max_point: 40
+      method: 0 # 0 is RegionGrowing, 1 is EuclideanCluster
       euclidean_clustering:
         max_z_mean: 0.2
         max_z_variance: 0.1 
         distance_tolerance: 1.0
       region_growing:
         max_degrees: 10.0
-        curvature_threshold: 2.0
+        curvature_threshold: 3.0
     ground_removal:
       method: 1 # 0 is PMF, 1 is RANSAC
