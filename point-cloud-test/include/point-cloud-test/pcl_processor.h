@@ -46,6 +46,7 @@ enum ClusteringMethod {
 enum GroundRemovalMethod {
     PMF,   // 0
     RANSAC, // 1
+    NONE = -1,
 };
 
 
@@ -58,8 +59,10 @@ inline ClusteringMethod castClusteringMethod(int input) {
   }
 
 inline GroundRemovalMethod castGroundRemovalMethod(int input) {
-  if (input < 0 || input > 1) {
+  if (input > 1) {
     return RANSAC;
+  } else if (input < 0) {
+    return NONE;
   } else {
     return static_cast<GroundRemovalMethod>(input);
   }

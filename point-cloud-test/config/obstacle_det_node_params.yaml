@@ -1,7 +1,7 @@
 obstacle_det_pcl_proc_node:
   ros__parameters:
-    use_sim_time: true
-    is_sim: true
+    use_sim_time: true # Jadikan ini false ketika tidak main simulasi/ros2 bag
+    is_sim: false # Jadikan ini false ketika tidak main di simulasi
     use_odom_pcl_pair: true
     voxel_size: 0.3
     max_pcl_points: 350000
@@ -13,20 +13,23 @@ obstacle_det_pcl_proc_node:
     lidar_max_dist_thresh: 10.0
     is_lidar: true
     max_pcl_odom_pair: 10
+    odom_type: sensor
+    pose_type: sensor
+    pcl_type: sensor
     clustering:
-      max_points: 50
+      max_points: 50 # Maksimum voxel point di cluster sebelum di split
       min_points: 2
-      distance_thresh: 0.4
-      split_cluster_threshold: 20
-      ellipsoid_extended_radii: 1.7320508
+      distance_thresh: 0.4 # Distance thresh untuk clustering
+      split_cluster_threshold: 20 # Split ketika ellipsoid menutupi setidaknya 20 voxel
+      ellipsoid_extended_radii: 1.7320508 # Memastikan ellipsoid cover semua voxel
     output_frame: odom
     map_frame: odom
     ground_removal:
-      method: 1 # 0 is PMF, 1 is RANSAC
+      method: 1 # 0 is PMF, 1 is RANSAC, -1 No Ground Removal
 
 bb_pcl_proc_node:
   ros__parameters:
-    use_sim_time: true
+    use_sim_time: true # Jadikan ini false ketika tidak main simulasi/ros2 bag
     map_frame: odom
     use_odom_pcl_pair: false
     voxel_size: 0.3

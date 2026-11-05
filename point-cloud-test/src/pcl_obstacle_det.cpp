@@ -64,6 +64,9 @@ namespace point_cloud_test
       this->declare_parameter<int>("max_pcl_odom_pair", 10);
       this->declare_parameter<std::string>("output_frame", "map");
       this->declare_parameter<std::string>("map_frame", "map");
+      this->declare_parameter<std::string>("odom_type", "reliable");
+      this->declare_parameter<std::string>("pcl_type", "reliable");
+      this->declare_parameter<std::string>("pose_type", "reliable");
 
       // ground removal
       this->declare_parameter<int>("ground_removal.method", 1);
@@ -108,6 +111,8 @@ namespace point_cloud_test
       bool is_use_odom_pcl_pair = false;
       int callback_time = 500;
 
+      std::string odom_type, pcl_type, pose_type = "";
+
       this->get_parameter("use_odom_pcl_pair", is_use_odom_pcl_pair);
       this->get_parameter("voxel_size", voxel_size);
       this->get_parameter("max_pcl_points", max_pcl_points);
@@ -122,6 +127,9 @@ namespace point_cloud_test
       this->get_parameter("is_lidar", is_lidar);
       this->get_parameter("lidar_min_dist_thresh", lidar_dist_thresh);
       this->get_parameter("lidar_max_dist_thresh", lidar_dist_max);
+      this->get_parameter("odom_type", odom_type);
+      this->get_parameter("pcl_type", pcl_type);
+      this->get_parameter("pose_type", pose_type);
 
       if (!std::isfinite(cloud_history_seconds_) || cloud_history_seconds_ <= 0.0 ||
           !std::isfinite(voxel_size) || voxel_size <= 0.0f ||
@@ -138,13 +146,18 @@ namespace point_cloud_test
       sub_opts.callback_group = sync_cb_group_;
 
       cloud_sub_.subscribe(this, "/input_cloud",
-                           rclcpp::QoS(10).best_effort().get_rmw_qos_profile(), sub_opts);
+                          pcl_type == "sensor" ? rclcpp::QoS(10).best_effort().get_rmw_qos_profile() 
+                            : rclcpp::QoS(10).reliable().get_rmw_qos_profile(), 
+                          sub_opts);
       zed_pose_sub_.subscribe(this, "/zed/zed_node/pose",
                               rclcpp::QoS(10).best_effort().get_rmw_qos_profile(), sub_opts);
 
       if (is_use_odom_pcl_pair)
       {
-        odom_sub_.subscribe(this, "/odom", rclcpp::QoS(10).reliable().get_rmw_qos_profile(), sub_opts);
+        odom_sub_.subscribe(this, "/odom", 
+          odom_type == "sensor" ? rclcpp::QoS(10).best_effort().get_rmw_qos_profile() 
+                            : rclcpp::QoS(10).reliable().get_rmw_qos_profile(), 
+          sub_opts);
         sync_PCL_Odometry_ = std::make_shared<SynchronizerPCLAndOdometry>(
             SyncPolicyPCLAndOdometry(10), cloud_sub_, odom_sub_);
         sync_PCL_Odometry_->registerCallback(&PclObstacleDetectionNode::sync_callback_odom_pcl, this);
@@ -152,20 +165,15 @@ namespace point_cloud_test
       }
       else
       {
-        if (is_sim) {
-          ekf_pose_sub_.subscribe(this, "/ekf_pose", rclcpp::QoS(10).best_effort().get_rmw_qos_profile(), sub_opts);
-          sync_PCL_PoseStamped_ = std::make_shared<SynchronizerPCLAndPoseStamped>(
-              SyncPolicyPCLAndPoseStamped(10), cloud_sub_, ekf_pose_sub_);
-          sync_PCL_PoseStamped_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.5));
-          sync_PCL_PoseStamped_->registerCallback(&PclObstacleDetectionNode::sync_callback_pose_pcl, this);
-          RCLCPP_INFO(get_logger(), "SIM STATUS: %d, running sync ekf and pcl only", is_sim);
-        } else {
-          ekf_pose_sub_.subscribe(this, "/ekf_pose", rclcpp::QoS(10).best_effort().get_rmw_qos_profile(), sub_opts);
-          sync_PCL_TwoPoseStamped_ = std::make_shared<SynchronizerPCLAndTwoPoseStamped>(
-              SyncPolicyPCLAndTwoPoseStamped(10), cloud_sub_, ekf_pose_sub_, zed_pose_sub_);
-          sync_PCL_TwoPoseStamped_->registerCallback(&PclObstacleDetectionNode::sync_callback_twoPose_pcl, this);
-          RCLCPP_INFO(get_logger(), "SIM STATUS: %d, running sync ekf,zed and pcl", is_sim);
-        }
+        ekf_pose_sub_.subscribe(this, "/ekf_pose", 
+          pose_type == "sensor" ? rclcpp::QoS(10).best_effort().get_rmw_qos_profile() 
+            : rclcpp::QoS(10).reliable().get_rmw_qos_profile(), 
+          sub_opts);
+        sync_PCL_PoseStamped_ = std::make_shared<SynchronizerPCLAndPoseStamped>(
+            SyncPolicyPCLAndPoseStamped(10), cloud_sub_, ekf_pose_sub_);
+        sync_PCL_PoseStamped_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(0.5));
+        sync_PCL_PoseStamped_->registerCallback(&PclObstacleDetectionNode::sync_callback_pose_pcl, this);
+        RCLCPP_INFO(get_logger(), "SIM STATUS: %d, running sync ekf, and pcl", is_sim);
       }
 
       ellipsoids_pub_ = create_publisher<pcl_cstm_msg::msg::AxisAlignedElipsoidArray>(
@@ -319,6 +327,7 @@ namespace point_cloud_test
       pose_ptr->pose = odom_msg->pose.pose;
       pose_ptr->header = odom_msg->header;
       std::lock_guard<std::mutex> lock(swap_mutex_);
+      // RCLCPP_INFO(get_logger(), "Running Pair 3");
       enqueue_cloud(PendingCloud{cloud_msg, pose_ptr, 0.0f});
     }
 
@@ -522,23 +531,29 @@ namespace point_cloud_test
       merged_cloud->height = 1;
       merged_cloud->is_dense = true;
 
+      bool empty_cloud = false;
       auto time_ransac_start = std::chrono::high_resolution_clock::now();
       pcl::PointCloud<pcl::PointXYZ>::Ptr non_ground(new pcl::PointCloud<pcl::PointXYZ>);
       if (merged_cloud->empty())
       {
         // Still publish an empty result so expired obstacles disappear downstream.
+        empty_cloud = true;
       }
       else if (ground_removal_method == PMF)
       {
         non_ground = processPMF(merged_cloud);
       }
-      else
+      else if (ground_removal_method == RANSAC)
       {
         non_ground = processRANSAC(merged_cloud);
+      } else {
+        // No filter
+        *non_ground = *merged_cloud;
       }
+
       if (!non_ground || non_ground->empty())
       {
-        RCLCPP_WARN(get_logger(), "Ground removal failed");
+        RCLCPP_WARN(get_logger(), empty_cloud ? "Empty merged cloud" : "Ground removal failed");
         non_ground.reset(new pcl::PointCloud<pcl::PointXYZ>);
       }
       auto time_ransac_end = std::chrono::high_resolution_clock::now();
